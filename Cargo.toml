@@ -1,0 +1,10 @@
+[package]
+name = "arcs-hipot"
+version = "0.1.0"
+authors = ["Keefe Murphy <keefe_b_murphy@whirlpool.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "0.2", features = ["io-util"] }
