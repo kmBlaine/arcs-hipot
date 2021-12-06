@@ -1,10 +1,11 @@
 //! **A**synchronous-Rust **R**emote **C**ontrol for **S**CI **Hipot** testers
-
+use tokio::io::{ AsyncWriteExt, AsyncReadExt };
 use std::{
     time::Duration,
     ops::{ Add, Sub },
     cmp::{ PartialEq, PartialOrd, Eq, Ord, Ordering },
     fmt,
+    io,
 };
 
 /// Decimal number with fractional billionths (10e-9)
@@ -358,13 +359,6 @@ pub enum AcFrequency
     Hz60,
 }
 
-enum TestLimit
-{
-    Microamp(u32),
-    Megaohm(u16),
-    Milliohm(u16),
-}
-
 enum CmdSet
 {
     /// Ready a test file stored on the device for execution and editing
@@ -404,17 +398,25 @@ enum CmdSet
     ///
     /// Command: `EF <1|0>`
     SetAcFrequency(AcFrequency),
-    /// On the currently selected step, set the maximum allowble measured value. The precise
-    /// value and semantics depend on the test being run.
+    /// On the currently selected step, set the maximum allowble leakage current when running an AC
+    /// or DC hipot test. Tenth-milliamp precision.
     ///
-    /// Command: `EH <limit>`
-    SetCurrentHiLimit(Amp),
-    /// On the currently selected step, set the maximum allowble measured value. The precise
-    /// value and semantics depend on the test being run.
+    /// Command: `EH <milliamp>`
+    SetLeakCurrentHiLimit(Amp),
+    /// On the currently selected step, set the minimum allowable leakage current when running an AC
+    /// or DC hipot test. Tenth-milliamp precison.
     ///
-    /// Command: `EL <limit>`
-    SetCurrentLoLimit(Amp),
+    /// Command: `EL <milliamp>`
+    SetLeakCurrentLoLimit(Amp),
+    /// On the currently selected step, set the maximum allowable ground line resistance when
+    /// running a ground bond test.
+    ///
+    /// Command: `EH <milliohm>`
     SetResistanceHiLimit(Ohm),
+    /// On the currently selected step, set the minimum allowable ground line resistance when
+    /// running a ground bond test.
+    ///
+    /// Command: `EH <milliohm>`
     SetResistanceLoLimit(Ohm),
     /// On the currently selected step, set the ground connection resistance offset in milliohms.
     /// Applicable only to ground bond tests.
@@ -443,7 +445,7 @@ impl fmt::Display for CmdSet
             Self::SetAcHipot => write!(f, "SAA"),
             Self::SetGndBond => write!(f, "SAG"),
             Self::ContinueToNext(cont) => write!(f, "ECC {}", if *cont { '1' } else { '0' }),
-            Self::SetGndCheckCurrent(check_current) => write!(f, "EC {}", check_current.value.display_milli(0)),
+            Self::SetGndCheckCurrent(check_current) => write!(f, "EC {}", check_current.display(1)),
             Self::SetDwell(seconds) => write!(f, "EDW {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
             Self::SetAcFrequency(frequency) => {
                 write!(
@@ -455,15 +457,50 @@ impl fmt::Display for CmdSet
                     }
                 )
             },
-            Self::SetCurrentHiLimit(leak_current) => write!(f, "EH {}", leak_current.value.display_milli(1)),
-            Self::SetCurrentLoLimit(leak_current) => write!(f, "EL {}", leak_current.value.display_milli(1)),
+            Self::SetLeakCurrentHiLimit(leak_current) => write!(f, "EH {}", leak_current.value.display_milli(1)),
+            Self::SetLeakCurrentLoLimit(leak_current) => write!(f, "EL {}", leak_current.value.display_milli(1)),
             Self::SetResistanceHiLimit(resistance) => write!(f, "EH {}", resistance.value.display_milli(0)),
             Self::SetResistanceLoLimit(resistance) => write!(f, "EL {}", resistance.value.display_milli(0)),
             Self::SetGndOffset(offset) => write!(f, "EO {}", offset.value.display_milli(0)),
             Self::SetRampTime(seconds) => write!(f, "ERU {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-            Self::SetHipotVoltage(voltage) => write!(f, "EV {}", voltage.value.display_kilo(1)),
+            Self::SetHipotVoltage(voltage) => write!(f, "EV {}", voltage.value.display_kilo(2)),
         }
     }
+}
+
+/// Executes the given command, sending to the device and checking the response
+///
+/// When the device responds with a positive ACK, `Ok` is returned. When an error occurrs on
+/// reading/writing to the stream, `Err` is returned. When the command is successfully written and
+/// the device responds with a negative ACK (NAK), an error is returned with an `ErrorKind`
+/// depending on the nature if the command. If the command asks the device set up a test it does not
+/// support -- e.g. a ground bond when it is a hipot-only tester -- then an I/O error with the kind
+/// `Unsupported` is returned. In all other NAK cases, `InvalidData` is returned.
+async fn exec_cmd<T>(io_handle: &mut T, cmd: &CmdSet) -> Result<(), io::Error>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+{
+    let serialized = format!("{}\n", cmd);
+    io_handle.write_all(serialized.as_bytes()).await?;
+    let mut response = [0u8; 2];
+    let expected = [0x06u8, 0x0A]; // Device respondes with 0x06 ACK or 0x15 NAK and then a newline
+    io_handle.read_exact(&mut response).await?;
+
+    if response != expected {
+        Err(io::Error::from(io::ErrorKind::InvalidInput))
+    }
+    else {
+        Ok(())
+    }
+}
+
+async fn exec_all<T>(io_handle: &mut T, cmds: &[CmdSet]) -> Result<(), io::Error>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+{
+    for cmd in cmds.iter() {
+        exec_cmd(io_handle, cmd).await?;
+    }
+
+    Ok(())
 }
 
 pub struct AcHipotBuilder
@@ -563,13 +600,13 @@ impl GndBondBuilder
         self
     }
 
-    pub fn max_resistance(mut self, ohms: Ohm) -> Self
+    pub fn resistance_max(mut self, ohms: Ohm) -> Self
     {
         self.resistance_max = Some(ohms);
         self
     }
 
-    pub fn min_resistance(mut self, ohms: Ohm) -> Self
+    pub fn resistance_min(mut self, ohms: Ohm) -> Self
     {
         self.resistance_min = Some(ohms);
         self
@@ -703,6 +740,7 @@ impl TestEditor
                         // devices which don't support AC hipot won't have an AC hipot builder exposed
                         // thus we can't ever get an AC hipot step
                         let ac_hipot_limits = ac_hipot_limits.as_ref().unwrap();
+                        cmds.push(CmdSet::SetAcHipot);
 
                         if let Some(voltage) = params.voltage {
                             if voltage > ac_hipot_limits.voltage_max || voltage < ac_hipot_limits.voltage_min {
@@ -724,7 +762,7 @@ impl TestEditor
                             {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetCurrentLoLimit(leak_current_min));
+                            cmds.push(CmdSet::SetLeakCurrentLoLimit(leak_current_min));
                         }
 
                         if let Some(leak_current_max) = params.leak_current_max {
@@ -733,7 +771,7 @@ impl TestEditor
                             {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetCurrentHiLimit(leak_current_max));
+                            cmds.push(CmdSet::SetLeakCurrentHiLimit(leak_current_max));
                         }
 
                         if let Some(ramp) = params.ramp {
@@ -749,6 +787,7 @@ impl TestEditor
                     },
                     TestParams::GndBond(params) => {
                         let gnd_bond_limits = gnd_bond_limits.as_ref().unwrap();
+                        cmds.push(CmdSet::SetGndBond);
 
                         if let Some(check_current) = params.check_current {
                             if check_current > gnd_bond_limits.check_current_max
@@ -877,7 +916,7 @@ macro_rules! define_device
 {
     { model: $dev:ident, files: $files:literal, steps_per_file: $steps:literal, supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+] } => {
         mod $dev {
-            use super::{Amp, Volt, Ohm, TestSupport, AcHipotLimits, GndBondLimits, AcHipotBuilder, GndBondBuilder};
+            use super::{Amp, Volt, Ohm, TestSupport, AcHipotLimits, GndBondLimits, AcHipotBuilder, GndBondBuilder, exec_all};
             use std::time::Duration;
             use tokio::io::{ AsyncReadExt, AsyncWriteExt };
 
@@ -900,8 +939,15 @@ macro_rules! define_device
             }
 
             impl <T> Device<T>
-                where T: AsyncReadExt + AsyncWriteExt + Send
+                where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
             {
+                pub fn with(io_handle: T) -> Self
+                {
+                    Device {
+                        io_handle: io_handle,
+                    }
+                }
+
                 pub fn edit_test<'h>(&'h mut self, file_num: u32) -> TestEditor<'h, T>
                 {
                     TestEditor {
@@ -921,12 +967,12 @@ macro_rules! define_device
 
             pub struct TestEditor<'h, T>
             {
-                dev: &'h Device<T>,
+                dev: &'h mut Device<T>,
                 editor: super::TestEditor,
             }
 
             impl <'h, T> TestEditor<'h, T>
-                where T: AsyncReadExt + AsyncWriteExt + Send,
+                where T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
             {
                 pub fn step(mut self, step_num: u32) -> Self
                 {
@@ -940,21 +986,21 @@ macro_rules! define_device
                     self
                 }
 
-                // pub async fn exec(self) -> Result<(), std::io::Error>
-                // {
-                //     // TODO create the actual error kinds for the various ways this can fail
-                //     let cmds = self
-                //         .editor
-                //         .compile(
-                //             self.dev.ac_hipot(),
-                //             self.dev.gnd_bond(),
-                //             self.dev.files(),
-                //             self.dev.steps_per_file(),
-                //         )
-                //         .ok_or(std::io::Error::from(std::io::ErrorKind::Unsupported))?;
+                pub async fn exec(self) -> Result<(), std::io::Error>
+                {
+                    // TODO create the actual error kinds for the various ways this can fail
+                    let cmds = self
+                        .editor
+                        .compile(
+                            self.dev.ac_hipot(),
+                            self.dev.gnd_bond(),
+                            self.dev.files(),
+                            self.dev.steps_per_file(),
+                        )
+                        .ok_or(std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     
-                    
-                // }
+                    exec_all(&mut self.dev.io_handle, &cmds).await
+                }
 
                 $(impl_test_editor!{$test_type})+
             }
@@ -993,6 +1039,8 @@ define_device!{
         }
     ]
 }
+
+pub use sci_4520::{ Device as Sci4520, TestEditor as Sci4520TestEditor };
 /*
 device
     .edit_test(1)
@@ -1029,7 +1077,8 @@ device
 
 #[cfg(test)]
 mod tests {
-    use super::Amp;
+    use super::{ Amp, Ohm, Volt, CmdSet, AcFrequency};
+    use std::time::Duration;
 
     #[test]
     fn display_amp_subscalar_normal()
@@ -1107,6 +1156,28 @@ mod tests {
     fn decimal_normalizes()
     {
         assert_eq!(Amp::from_parts(0, 1_100_000_000), Amp::from_parts(1, 100_000_000));
+    }
+
+    #[test]
+    fn serialize_cmd_set()
+    {
+        assert_eq!(&format!("{}", CmdSet::LoadFile(3)), "LF 3");
+        assert_eq!(&format!("{}", CmdSet::SelectStep(1)), "SS 1");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipot,), "SAA");
+        assert_eq!(&format!("{}", CmdSet::SetGndBond,), "SAG");
+        assert_eq!(&format!("{}", CmdSet::ContinueToNext(true)), "ECC 1");
+        assert_eq!(&format!("{}", CmdSet::ContinueToNext(false)), "ECC 0");
+        assert_eq!(&format!("{}", CmdSet::SetGndCheckCurrent(Amp::from_whole(25))), "EC 25.0");
+        assert_eq!(&format!("{}", CmdSet::SetDwell(Duration::from_millis(2_345))), "EDW 2.3");
+        assert_eq!(&format!("{}", CmdSet::SetAcFrequency(AcFrequency::Hz50)), "EF 0");
+        assert_eq!(&format!("{}", CmdSet::SetAcFrequency(AcFrequency::Hz60)), "EF 1");
+        assert_eq!(&format!("{}", CmdSet::SetLeakCurrentHiLimit(Amp::from_micros(67_800))), "EH 67.8");
+        assert_eq!(&format!("{}", CmdSet::SetLeakCurrentLoLimit(Amp::from_micros(0))), "EL 0.0");
+        assert_eq!(&format!("{}", CmdSet::SetResistanceHiLimit(Ohm::from_millis(128))), "EH 128");
+        assert_eq!(&format!("{}", CmdSet::SetResistanceLoLimit(Ohm::from_millis(0))), "EL 0");
+        assert_eq!(&format!("{}", CmdSet::SetGndOffset(Ohm::from_millis(56))), "EO 56");
+        assert_eq!(&format!("{}", CmdSet::SetRampTime(Duration::from_millis(4_321))), "ERU 4.3");
+        assert_eq!(&format!("{}", CmdSet::SetHipotVoltage(Volt::from_whole(1250))), "EV 1.25");
     }
 
     #[test]
