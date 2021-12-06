@@ -4,8 +4,22 @@ use std::{
     time::Duration,
     ops::{ Add, Sub },
     cmp::{ PartialEq, PartialOrd, Eq, Ord, Ordering },
+    fmt,
 };
 
+/// Decimal number with fractional billionths (10e-9)
+///
+/// **Justification:**
+///
+/// While there are tons of scientific, rational number, arbitrary precision, fixed precision, and
+/// other numerics libraries for Rust, most of them are inappropriate or complete overkill for what
+/// I'm trying to do here. Basically, I need fine-grained control over parsing and formatting,
+/// type safety, lossless numbers with micro (10e-6) precision, and strictly real numbers.
+/// Uom is about the closest any library comes to this but it does all of it's arithmetic in base
+/// units, meaning if you select integers as the underlying storage, you don't get even close to
+/// the level of precision I need in many cases. And if you select floats, then you're not lossless
+/// nor strictly real anymore.
+#[derive(Debug, Clone, Copy)]
 struct DecimalNano
 {
     whole: u32,
@@ -14,6 +28,11 @@ struct DecimalNano
 
 impl DecimalNano
 {
+    fn is_zero(&self) -> bool
+    {
+        self.whole == 0 && self.nanos == 0
+    }
+
     fn pack_into_u64(&self) -> u64
     {
         ((self.whole as u64) << 32) | (self.nanos as u64)
@@ -48,6 +67,35 @@ impl DecimalNano
     pub fn as_f64(&self) -> f64
     {
         (self.whole as f64) + (self.nanos as f64 / 1_000_000_000f64)
+    }
+
+    /// Displays the value with a floating decimal point and certain level of precision
+    ///
+    /// The position of the decimal point is specified with a power of ten and the precision is
+    /// given by a number places after the decimal point to display. Truncates unused digits
+    fn display_scalar(&self, magnitude: i32, decimal_pts: u32) -> DecimalNanoDisplay
+    {
+        DecimalNanoDisplay {
+            whole: self.whole,
+            nanos: self.nanos,
+            power_10: magnitude,
+            decimal_pts: decimal_pts,
+        }
+    }
+
+    fn display(&self, decimal_pts: u32) -> DecimalNanoDisplay
+    {
+        self.display_scalar(0, decimal_pts)
+    }
+
+    fn display_milli(&self, decimal_pts: u32) -> DecimalNanoDisplay
+    {
+        self.display_scalar(-3, decimal_pts)
+    }
+
+    fn display_kilo(&self, decimal_pts: u32) -> DecimalNanoDisplay
+    {
+        self.display_scalar(3, decimal_pts)
     }
 }
 
@@ -106,9 +154,94 @@ impl Ord for DecimalNano
     }
 }
 
+pub struct DecimalNanoDisplay
+{
+    whole: u32,
+    nanos: u32,
+    decimal_pts: u32,
+    power_10: i32,
+}
+
+impl fmt::Display for DecimalNanoDisplay
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        let decimal_index = (10 - self.power_10) as usize;
+        let mut divisor = 1_000_000_000;
+        // convert to binary coded decimal
+        // this can then be converted directly to a UTF8 string without checks
+        // avoids double allocation of a vector by building and then cloning
+        let mut bcd = [0u8; 20]; // 10 bytes for the whole, 9 for the nanos, 1 decimal point
+        let mut dividend = self.whole;
+
+        for index in 0..10 {
+            let value = (dividend / divisor) as u8 | 0x30;
+
+            if index >= decimal_index {
+                if index == decimal_index {
+                    bcd[index] = 0x2E;
+                }
+                bcd[index + 1] = value;
+            }
+            else {
+                bcd[index] = value;
+            }
+            
+            dividend = dividend % divisor;
+            divisor /= 10;
+        }
+
+        dividend = self.nanos;
+        divisor = 100_000_000;
+
+        for index in 10..19 {
+            let value = (dividend / divisor) as u8 | 0x30;
+
+            if index >= decimal_index {
+                if index == decimal_index {
+                    bcd[index] = 0x2E;
+                }
+                bcd[index + 1] = value;
+            }
+            else {
+                bcd[index] = value;
+            }
+
+            dividend = dividend % divisor;
+            divisor /= 10;
+        }
+
+        // default the start index to on before the decimal place
+        // we will find if there are any others in there later
+        let mut start_index = decimal_index - 1;
+        let final_index = if self.decimal_pts == 0 {
+            decimal_index
+        }
+        else {
+            decimal_index + 1 + self.decimal_pts as usize
+        };
+
+        // find the first nonzero item
+        for index in 0..decimal_index {
+            if bcd[index] > 0x30 {
+                start_index = index;
+                break;
+            }
+        }
+
+        // This should be safe since any number less than ten plus 0x30 is a valid UTF8/ASCII arabic numeral
+        // If the indices are negative or beyond the end of the array, then a panic will be triggered from attempting
+        // to slice out of bounds. No undefined behavior should be possible.
+        let value_as_string = unsafe { String::from_utf8_unchecked(bcd[start_index..final_index].to_vec()) };
+
+        write!(f, "{}", value_as_string)
+    }
+}
+
 macro_rules! unit
 {
     ($u:ident) => {
+        #[derive(Debug, Clone, Copy)]
         pub struct $u
         {
             value: DecimalNano,
@@ -139,6 +272,31 @@ macro_rules! unit
             pub fn as_f64(&self) -> f64
             {
                 self.value.as_f64()
+            }
+
+            pub fn display_milli(&self, decimal_pts: u32) -> DecimalNanoDisplay
+            {
+                self.value.display_milli(decimal_pts)
+            }
+
+            pub fn display_kilo(&self, decimal_pts: u32) -> DecimalNanoDisplay
+            {
+                self.value.display_kilo(decimal_pts)
+            }
+
+            pub fn display(&self, decimal_pts: u32) -> DecimalNanoDisplay
+            {
+                self.value.display(decimal_pts)
+            }
+
+            pub fn whole(&self) -> u32
+            {
+                self.value.whole
+            }
+
+            pub fn fraction(&self) -> u32
+            {
+                self.value.nanos
             }
         }
 
@@ -193,6 +351,7 @@ unit!(Amp);
 unit!(Volt);
 unit!(Ohm);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AcFrequency
 {
     Hz50,
@@ -272,6 +431,39 @@ enum CmdSet
     ///
     /// Command: `EV <kilovolt>`
     SetHipotVoltage(Volt),
+}
+
+impl fmt::Display for CmdSet
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        match self {
+            Self::LoadFile(file_num) => write!(f, "LF {}", file_num),
+            Self::SelectStep(step_num) => write!(f, "SS {}", step_num),
+            Self::SetAcHipot => write!(f, "SAA"),
+            Self::SetGndBond => write!(f, "SAG"),
+            Self::ContinueToNext(cont) => write!(f, "ECC {}", if *cont { '1' } else { '0' }),
+            Self::SetGndCheckCurrent(check_current) => write!(f, "EC {}", check_current.value.display_milli(0)),
+            Self::SetDwell(seconds) => write!(f, "EDW {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+            Self::SetAcFrequency(frequency) => {
+                write!(
+                    f,
+                    "EF {}",
+                    match frequency {
+                        AcFrequency::Hz50 => '0',
+                        AcFrequency::Hz60 => '1',
+                    }
+                )
+            },
+            Self::SetCurrentHiLimit(leak_current) => write!(f, "EH {}", leak_current.value.display_milli(1)),
+            Self::SetCurrentLoLimit(leak_current) => write!(f, "EL {}", leak_current.value.display_milli(1)),
+            Self::SetResistanceHiLimit(resistance) => write!(f, "EH {}", resistance.value.display_milli(0)),
+            Self::SetResistanceLoLimit(resistance) => write!(f, "EL {}", resistance.value.display_milli(0)),
+            Self::SetGndOffset(offset) => write!(f, "EO {}", offset.value.display_milli(0)),
+            Self::SetRampTime(seconds) => write!(f, "ERU {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+            Self::SetHipotVoltage(voltage) => write!(f, "EV {}", voltage.value.display_kilo(1)),
+        }
+    }
 }
 
 pub struct AcHipotBuilder
@@ -482,8 +674,8 @@ impl TestEditor
 
     fn compile(
         self,
-        ac_hipot_limits: AcHipotLimits,
-        gnd_bond_limits: GndBondLimits,
+        ac_hipot_limits: Option<AcHipotLimits>,
+        gnd_bond_limits: Option<GndBondLimits>,
         max_file_num: u32,
         max_step_num: u32,
     )
@@ -508,6 +700,10 @@ impl TestEditor
             if let Some(overrides) = step.params {
                 match overrides {
                     TestParams::AcHipot(params) => {
+                        // devices which don't support AC hipot won't have an AC hipot builder exposed
+                        // thus we can't ever get an AC hipot step
+                        let ac_hipot_limits = ac_hipot_limits.as_ref().unwrap();
+
                         if let Some(voltage) = params.voltage {
                             if voltage > ac_hipot_limits.voltage_max || voltage < ac_hipot_limits.voltage_min {
                                 return None;
@@ -552,6 +748,8 @@ impl TestEditor
                         }
                     },
                     TestParams::GndBond(params) => {
+                        let gnd_bond_limits = gnd_bond_limits.as_ref().unwrap();
+
                         if let Some(check_current) = params.check_current {
                             if check_current > gnd_bond_limits.check_current_max
                                 || check_current < gnd_bond_limits.check_current_min
@@ -690,8 +888,15 @@ macro_rules! define_device
 
             impl <T> Device<T>
             {
-                const FILES_NUM: u32 = $files;
-                const STEPS_PER_FILE: u32 = $steps;
+                pub fn files(&self) -> u32
+                {
+                    $files
+                }
+
+                pub fn steps_per_file(&self) -> u32
+                {
+                    $steps
+                }
             }
 
             impl <T> Device<T>
@@ -721,18 +926,35 @@ macro_rules! define_device
             }
 
             impl <'h, T> TestEditor<'h, T>
+                where T: AsyncReadExt + AsyncWriteExt + Send,
             {
-                fn step(mut self, step_num: u32) -> Self
+                pub fn step(mut self, step_num: u32) -> Self
                 {
                     self.editor.step(step_num);
                     self
                 }
 
-                fn continue_to_next(mut self, cont: bool) -> Self
+                pub fn continue_to_next(mut self, cont: bool) -> Self
                 {
                     self.editor.continue_to_next(cont);
                     self
                 }
+
+                // pub async fn exec(self) -> Result<(), std::io::Error>
+                // {
+                //     // TODO create the actual error kinds for the various ways this can fail
+                //     let cmds = self
+                //         .editor
+                //         .compile(
+                //             self.dev.ac_hipot(),
+                //             self.dev.gnd_bond(),
+                //             self.dev.files(),
+                //             self.dev.steps_per_file(),
+                //         )
+                //         .ok_or(std::io::Error::from(std::io::ErrorKind::Unsupported))?;
+                    
+                    
+                // }
 
                 $(impl_test_editor!{$test_type})+
             }
@@ -807,6 +1029,86 @@ device
 
 #[cfg(test)]
 mod tests {
+    use super::Amp;
+
+    #[test]
+    fn display_amp_subscalar_normal()
+    {
+        assert_eq!(&format!("{}", Amp::from_micros(45_600).display_milli(1)), "45.6");
+    }
+
+    #[test]
+    fn display_amp_subscalar_subnormal()
+    {
+        assert_eq!(&format!("{}", Amp::from_parts(0, 000_012_300).display_milli(4)), "0.0123");
+    }
+
+    #[test]
+    fn display_amp_subscalar_zero_with_pt()
+    {
+        assert_eq!(&format!("{}", Amp::from_micros(0).display_milli(2)), "0.00");
+    }
+
+    #[test]
+    fn display_amp_subscalar_zero_no_pt()
+    {
+        assert_eq!(&format!("{}", Amp::from_micros(0).display_milli(0)), "0");
+    }
+
+    #[test]
+    fn display_amp_normal()
+    {
+        assert_eq!(&format!("{}", Amp::from_millis(45_600).display(1)), "45.6");
+    }
+
+    #[test]
+    fn display_amp_subnormal()
+    {
+        assert_eq!(&format!("{}", Amp::from_parts(0, 012_300_000).display(3)), "0.012");
+    }
+
+    #[test]
+    fn display_amp_zero_with_pt()
+    {
+        assert_eq!(&format!("{}", Amp::from_micros(0).display(2)), "0.00");
+    }
+
+    #[test]
+    fn display_amp_zero_no_pt()
+    {
+        assert_eq!(&format!("{}", Amp::from_micros(0).display(0)), "0");
+    }
+
+    #[test]
+    fn display_amp_superscalar_normal()
+    {
+        assert_eq!(&format!("{}", Amp::from_whole(7890).display_kilo(2)), "7.89");
+    }
+
+    #[test]
+    fn display_amp_superscalar_subnormal()
+    {
+        assert_eq!(&format!("{}", Amp::from_whole(123).display_kilo(3)), "0.123");
+    }
+
+    #[test]
+    fn display_amp_superscalar_zero_with_pt()
+    {
+        assert_eq!(&format!("{}", Amp::from_whole(0).display_kilo(2)), "0.00");
+    }
+
+    #[test]
+    fn display_amp_superscalar_zero_no_pt()
+    {
+        assert_eq!(&format!("{}", Amp::from_whole(0).display_kilo(0)), "0");
+    }
+
+    #[test]
+    fn decimal_normalizes()
+    {
+        assert_eq!(Amp::from_parts(0, 1_100_000_000), Amp::from_parts(1, 100_000_000));
+    }
+
     #[test]
     fn it_works() {
         assert_eq!(2 + 2, 4);
