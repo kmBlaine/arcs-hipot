@@ -29,7 +29,7 @@ async fn create_ac_hipot_w_gnd_bond()
             .dwell_time(std::time::Duration::from_millis(3000))
             .ramp_time(std::time::Duration::from_millis(900))
         )
-        .exec()
+        .commit()
         .await
         .is_ok()
     );
@@ -43,7 +43,7 @@ async fn create_ac_hipot_w_gnd_bond()
             .dwell_time(std::time::Duration::from_secs(2))
         )
         .continue_to_next(false)
-        .exec()
+        .commit()
         .await
         .is_ok()
     );

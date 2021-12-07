@@ -440,7 +440,7 @@ impl fmt::Display for CmdSet
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
         match self {
-            Self::LoadFile(file_num) => write!(f, "LF {}", file_num),
+            Self::LoadFile(file_num) => write!(f, "FL {}", file_num),
             Self::SelectStep(step_num) => write!(f, "SS {}", step_num),
             Self::SetAcHipot => write!(f, "SAA"),
             Self::SetGndBond => write!(f, "SAG"),
@@ -883,13 +883,6 @@ trait TestSupport
     }
 }
 
-// pub struct Sci4520StepBuilder
-
-// pub struct Sci4520<T>
-// {
-//     interface: T,
-// }
-
 macro_rules! impl_test_editor
 {
     {ac_hipot} => {
@@ -955,6 +948,12 @@ macro_rules! define_device
                         editor: super::TestEditor::edit_file(file_num),
                     }
                 }
+
+                // pub fn print_screen(&mut self) -> Result<String, std::io::Error>
+                // {
+                //     self.io_handle.write_all("TD?".as_bytes()).await?;
+                //     let mut buf = 
+                // }
             }
 
             impl <T> TestSupport for Device<T>
@@ -986,7 +985,7 @@ macro_rules! define_device
                     self
                 }
 
-                pub async fn exec(self) -> Result<(), std::io::Error>
+                pub async fn commit(self) -> Result<(), std::io::Error>
                 {
                     // TODO create the actual error kinds for the various ways this can fail
                     let cmds = self
@@ -1161,7 +1160,7 @@ mod tests {
     #[test]
     fn serialize_cmd_set()
     {
-        assert_eq!(&format!("{}", CmdSet::LoadFile(3)), "LF 3");
+        assert_eq!(&format!("{}", CmdSet::LoadFile(3)), "FL 3");
         assert_eq!(&format!("{}", CmdSet::SelectStep(1)), "SS 1");
         assert_eq!(&format!("{}", CmdSet::SetAcHipot,), "SAA");
         assert_eq!(&format!("{}", CmdSet::SetGndBond,), "SAG");
