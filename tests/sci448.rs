@@ -1,5 +1,4 @@
-
-use arcs_hipot::{ Sci4520, AcHipotTestSpec, GndBondTestSpec, Amp, Ohm, Volt, AcFrequency };
+use arcs_hipot::{ Sci448, AcHipotTestSpec, GndBondTestSpec, Amp, Ohm, Volt, AcFrequency };
 
 const DEVICE_NAME: &'static str = "/dev/ttyS0";
 
@@ -15,10 +14,10 @@ async fn create_ac_hipot_w_gnd_bond()
         ..Default::default()
     };
 
-    let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &port_settings).unwrap());
+    let mut device = Sci448::with(tokio_serial::Serial::from_path(DEVICE_NAME, &port_settings).unwrap());
 
     assert!(device
-        .edit_sequence(1)
+        .edit_sequence()
         .step(1)
         .continue_to_next(true)
         .ac_hipot(AcHipotTestSpec::new()
@@ -35,7 +34,7 @@ async fn create_ac_hipot_w_gnd_bond()
     );
     
     assert!(device
-        .edit_sequence(1)
+        .edit_sequence()
         .step(2)
         .gnd_bond(GndBondTestSpec::new()
             .check_current(Amp::from_whole(25))

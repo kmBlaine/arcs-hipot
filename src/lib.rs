@@ -935,7 +935,7 @@ macro_rules! impl_device
 /// should be a module-friendly name e.g. `sci_4520`.
 macro_rules! define_device
 {
-    { model: $dev:ident, multi_sequence: $qualifier:ident $($sequences:tt)?, steps_per_sequence: $steps:literal, supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+] } => {
+    { model: $dev:ident, multi_sequence: $qualifier:ident $(($sequences:literal))?, steps_per_sequence: $steps:literal, supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+] } => {
         mod $dev {
             use super::{Amp, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
                 exec_all, StepInfo, TestParams
@@ -950,7 +950,7 @@ macro_rules! define_device
 
             impl <T> Device<T>
             {
-                impl_device!{sequence_count: $qualifier$($sequences)*}
+                impl_device!{sequence_count: $qualifier$(($sequences))*}
                 // pub fn sequences(&self) -> u32
                 // {
                 //     $files
@@ -1086,7 +1086,40 @@ define_device!{
     ]
 }
 
+define_device!{
+    model: sci_448,
+    multi_sequence: No,
+    steps_per_sequence: 20,
+    supported_tests: [
+        ac_hipot_test {
+            limits: AcHipotDeviceLimits {
+                voltage_min: Volt::from_whole(1000),
+                voltage_max: Volt::from_whole(5000),
+                dwell_min: Duration::from_millis(500),
+                dwell_max: Duration::from_millis(999_900),
+                leak_current_min: Amp::from_whole(0),
+                leak_current_max: Amp::from_micros(99_990),
+                ramp_min: Duration::from_millis(100),
+                ramp_max: Duration::from_millis(999_900),
+            }
+        },
+        gnd_bond_test {
+            limits: GndBondDeviceLimits {
+                check_current_min: Amp::from_whole(3),
+                check_current_max: Amp::from_whole(30),
+                dwell_min: Duration::from_millis(500),
+                dwell_max: Duration::from_millis(999_900),
+                offset_min: Ohm::from_whole(0),
+                offset_max: Ohm::from_millis(100),
+                resistance_min: Ohm::from_millis(0),
+                resistance_max: Ohm::from_millis(510),
+            }
+        }
+    ]
+}
+
 pub use sci_4520::{ Device as Sci4520, TestEditor as Sci4520TestEditor };
+pub use sci_448::{ Device as Sci448, TestEditor as Sci448TestEditor };
 /*
 device
     .edit_test(1)
