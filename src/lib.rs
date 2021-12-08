@@ -481,11 +481,11 @@ async fn exec_cmd<T>(io_handle: &mut T, cmd: &CmdSet) -> Result<(), io::Error>
 {
     let serialized = format!("{}\n", cmd);
     io_handle.write_all(serialized.as_bytes()).await?;
-    let mut response = [0u8; 2];
-    let expected = [0x06u8, 0x0A]; // Device respondes with 0x06 ACK or 0x15 NAK and then a newline
-    io_handle.read_exact(&mut response).await?;
+    let response = io_handle.read_u16().await?;
 
-    if response != expected {
+    // TODO this is a quick hack to work around unknown endianness behavior and lack of buffering
+    // This really should be replaced with a read of exactly 2 bytes and a buffer comparison
+    if response != 0x060A && response != 0x0A06 {
         Err(io::Error::from(io::ErrorKind::InvalidInput))
     }
     else {
@@ -503,7 +503,8 @@ async fn exec_all<T>(io_handle: &mut T, cmds: &[CmdSet]) -> Result<(), io::Error
     Ok(())
 }
 
-pub struct AcHipotBuilder
+#[derive(Clone)]
+pub struct AcHipotTestSpec
 {
     voltage: Option<Volt>,
     dwell: Option<Duration>,
@@ -513,7 +514,7 @@ pub struct AcHipotBuilder
     ramp: Option<Duration>,
 }
 
-impl AcHipotBuilder
+impl AcHipotTestSpec
 {
     pub fn new() -> Self
     {
@@ -564,7 +565,8 @@ impl AcHipotBuilder
     }
 }
 
-pub struct GndBondBuilder
+#[derive(Clone)]
+pub struct GndBondTestSpec
 {
     check_current: Option<Amp>,
     dwell: Option<Duration>,
@@ -574,7 +576,7 @@ pub struct GndBondBuilder
     offset: Option<Ohm>,
 }
 
-impl GndBondBuilder
+impl GndBondTestSpec
 {
     pub fn new() -> Self
     {
@@ -625,12 +627,14 @@ impl GndBondBuilder
     }
 }
 
+#[derive(Clone)]
 enum TestParams
 {
-    AcHipot(AcHipotBuilder),
-    GndBond(GndBondBuilder)
+    AcHipot(AcHipotTestSpec),
+    GndBond(GndBondTestSpec)
 }
 
+#[derive(Clone)]
 struct StepInfo
 {
     step_num: u32,
@@ -640,18 +644,16 @@ struct StepInfo
 
 struct TestEditor
 {
-    file_num: u32,
-    steps: Vec<StepInfo>,
+    sequence_num: u32,
     selected_step: u32,
 }
 
 impl TestEditor
 {
-    fn edit_file(file_num: u32) -> Self
+    fn edit_sequence(sequence_num: u32) -> Self
     {
         Self {
-            file_num: file_num,
-            steps: Vec::new(),
+            sequence_num: sequence_num,
             selected_step: 1,
         }
     }
@@ -661,47 +663,39 @@ impl TestEditor
         self.selected_step = step_num;
     }
 
-    fn gnd_bond(&mut self, params: GndBondBuilder)
+    fn test_spec(&self, step_buf: &mut [Option<StepInfo>], params: TestParams)
     {
-        let selected_step = self.selected_step; // need to copy the value so we don't put `self` into the closure
+        let index = self.selected_step as usize - 1;
 
-        if let Some(step_info) = self.steps.iter_mut().filter(|info| info.step_num == selected_step).next() {
-            step_info.params = Some(TestParams::GndBond(params));
+        if index >= step_buf.len() {
+            return;
+        }
+        
+        if let Some(step_info) = &mut step_buf[index] {
+            step_info.params = Some(params);
         }
         else {
-            self.steps.push(StepInfo {
+            step_buf[index] = Some(StepInfo {
                 step_num: self.selected_step,
-                params: Some(TestParams::GndBond(params)),
+                params: Some(params),
                 continue_to_next: None,
             })
         }
     }
 
-    fn ac_hipot(&mut self, params: AcHipotBuilder)
+    fn continue_to_next(&self, step_buf: &mut [Option<StepInfo>], cont: bool)
     {
-        let selected_step = self.selected_step; // need to copy the value so we don't put `self` into the closure
+        let index = self.selected_step as usize - 1;
 
-        if let Some(step_info) = self.steps.iter_mut().filter(|info| info.step_num == selected_step).next() {
-            step_info.params = Some(TestParams::AcHipot(params));
+        if index >= step_buf.len() {
+            return;
         }
-        else {
-            self.steps.push(StepInfo {
-                step_num: self.selected_step,
-                params: Some(TestParams::AcHipot(params)),
-                continue_to_next: None,
-            })
-        }
-    }
-
-    fn continue_to_next(&mut self, cont: bool)
-    {
-        let selected_step = self.selected_step; // need to copy the value so we don't put `self` into the closure
-
-        if let Some(step_info) = self.steps.iter_mut().filter(|info| info.step_num == selected_step).next() {
+        
+        if let Some(step_info) = &mut step_buf[index] {
             step_info.continue_to_next = Some(cont);
         }
         else {
-            self.steps.push(StepInfo {
+            step_buf[index] = Some(StepInfo {
                 step_num: self.selected_step,
                 params: None,
                 continue_to_next: Some(cont),
@@ -711,20 +705,26 @@ impl TestEditor
 
     fn compile(
         self,
-        ac_hipot_limits: Option<AcHipotLimits>,
-        gnd_bond_limits: Option<GndBondLimits>,
+        step_buf: &[Option<StepInfo>],
+        ac_hipot_limits: Option<AcHipotDeviceLimits>,
+        gnd_bond_limits: Option<GndBondDeviceLimits>,
         max_file_num: u32,
         max_step_num: u32,
     )
         -> Option<Vec<CmdSet>>
     {
-        if self.file_num > max_file_num {
+        if self.sequence_num > max_file_num {
             return None;
         }
 
-        let mut cmds = vec![CmdSet::LoadFile(self.file_num)];
+        let mut cmds = vec![CmdSet::LoadFile(self.sequence_num)];
 
-        for step in self.steps {
+        for step in step_buf {
+            if step.is_none() {
+                continue;
+            }
+            let step = step.as_ref().unwrap();
+
             if step.step_num > max_step_num {
                 return None;
             }
@@ -734,7 +734,7 @@ impl TestEditor
             // command
             cmds.push(CmdSet::SelectStep(step.step_num));
 
-            if let Some(overrides) = step.params {
+            if let Some(overrides) = &step.params {
                 match overrides {
                     TestParams::AcHipot(params) => {
                         // devices which don't support AC hipot won't have an AC hipot builder exposed
@@ -846,7 +846,7 @@ impl TestEditor
     }
 }
 
-pub struct AcHipotLimits
+pub struct AcHipotDeviceLimits
 {
     pub voltage_min: Volt,
     pub voltage_max: Volt,
@@ -858,7 +858,7 @@ pub struct AcHipotLimits
     pub ramp_min: Duration,
 }
 
-pub struct GndBondLimits
+pub struct GndBondDeviceLimits
 {
     pub check_current_min: Amp,
     pub check_current_max: Amp,
@@ -872,12 +872,12 @@ pub struct GndBondLimits
 
 trait TestSupport
 {
-    fn ac_hipot(&self) -> Option<AcHipotLimits>
+    fn ac_hipot_test(&self) -> Option<AcHipotDeviceLimits>
     {
         None
     }
 
-    fn gnd_bond(&self) -> Option<GndBondLimits>
+    fn gnd_bond_test(&self) -> Option<GndBondDeviceLimits>
     {
         None
     }
@@ -885,18 +885,46 @@ trait TestSupport
 
 macro_rules! impl_test_editor
 {
-    {ac_hipot} => {
-        pub fn ac_hipot(mut self, hipot_params: AcHipotBuilder) -> Self
+    {ac_hipot_test} => {
+        pub fn ac_hipot(mut self, hipot_params: AcHipotTestSpec) -> Self
         {
-            self.editor.ac_hipot(hipot_params);
+            self.editor.test_spec(&mut self.steps, TestParams::AcHipot(hipot_params));
             self
         }
     };
-    {gnd_bond} => {
-        pub fn gnd_bond(mut self, gnd_bond_params: GndBondBuilder) -> Self
+    {gnd_bond_test} => {
+        pub fn gnd_bond(mut self, gnd_bond_params: GndBondTestSpec) -> Self
         {
-            self.editor.gnd_bond(gnd_bond_params);
+            self.editor.test_spec(&mut self.steps, TestParams::GndBond(gnd_bond_params));
             self
+        }
+    };
+}
+
+macro_rules! impl_device
+{
+    {spawn_multisequence_editor: No} => {
+        pub fn edit_sequence<'h>(&'h mut self) -> TestEditor<'h, T>
+        {
+            TestEditor::new(self, 1)
+        }
+    };
+    {spawn_multisequence_editor: Yes} => {
+        pub fn edit_sequence<'h>(&'h mut self, sequence_num: u32) -> TestEditor<'h, T>
+        {
+            TestEditor::new(self, sequence_num)
+        }
+    };
+    {sequence_count: No} => {
+        pub fn sequences(&self) -> u32
+        {
+            1
+        }
+    };
+    {sequence_count: Yes($steps:literal)} => {
+        pub fn sequences(&self) -> u32
+        {
+            $steps
         }
     };
 }
@@ -907,9 +935,11 @@ macro_rules! impl_test_editor
 /// should be a module-friendly name e.g. `sci_4520`.
 macro_rules! define_device
 {
-    { model: $dev:ident, files: $files:literal, steps_per_file: $steps:literal, supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+] } => {
+    { model: $dev:ident, multi_sequence: $qualifier:ident $($sequences:tt)?, steps_per_sequence: $steps:literal, supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+] } => {
         mod $dev {
-            use super::{Amp, Volt, Ohm, TestSupport, AcHipotLimits, GndBondLimits, AcHipotBuilder, GndBondBuilder, exec_all};
+            use super::{Amp, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
+                exec_all, StepInfo, TestParams
+            };
             use std::time::Duration;
             use tokio::io::{ AsyncReadExt, AsyncWriteExt };
 
@@ -920,12 +950,13 @@ macro_rules! define_device
 
             impl <T> Device<T>
             {
-                pub fn files(&self) -> u32
-                {
-                    $files
-                }
+                impl_device!{sequence_count: $qualifier$($sequences)*}
+                // pub fn sequences(&self) -> u32
+                // {
+                //     $files
+                // }
 
-                pub fn steps_per_file(&self) -> u32
+                pub fn steps_per_sequence(&self) -> u32
                 {
                     $steps
                 }
@@ -941,13 +972,14 @@ macro_rules! define_device
                     }
                 }
 
-                pub fn edit_test<'h>(&'h mut self, file_num: u32) -> TestEditor<'h, T>
-                {
-                    TestEditor {
-                        dev: self,
-                        editor: super::TestEditor::edit_file(file_num),
-                    }
-                }
+                impl_device!{spawn_multisequence_editor: $qualifier}
+                // pub fn edit_test<'h>(&'h mut self, file_num: u32) -> TestEditor<'h, T>
+                // {
+                //     TestEditor {
+                //         dev: self,
+                //         editor: super::TestEditor::edit_file(file_num),
+                //     }
+                // }
 
                 // pub fn print_screen(&mut self) -> Result<String, std::io::Error>
                 // {
@@ -968,11 +1000,25 @@ macro_rules! define_device
             {
                 dev: &'h mut Device<T>,
                 editor: super::TestEditor,
+                steps: [Option<StepInfo>; $steps],
             }
 
             impl <'h, T> TestEditor<'h, T>
                 where T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
             {
+                fn new(dev: &'h mut Device<T>, sequence_num: u32) -> Self
+                {
+                    Self {
+                        dev: dev,
+                        editor: super::TestEditor::edit_sequence(sequence_num),
+                        // TODO instatiate this array differently
+                        // This only works for a limited number of values. I think up to 32 due limitations in the Rust compiler
+                        // And I don't want to implement Copy for the StepInfo type to be able to use [expr; size] notation
+                        // It's quite a sizeable type
+                        steps: Default::default(),
+                    }
+                }
+
                 pub fn step(mut self, step_num: u32) -> Self
                 {
                     self.editor.step(step_num);
@@ -981,7 +1027,7 @@ macro_rules! define_device
 
                 pub fn continue_to_next(mut self, cont: bool) -> Self
                 {
-                    self.editor.continue_to_next(cont);
+                    self.editor.continue_to_next(&mut self.steps, cont);
                     self
                 }
 
@@ -991,10 +1037,11 @@ macro_rules! define_device
                     let cmds = self
                         .editor
                         .compile(
-                            self.dev.ac_hipot(),
-                            self.dev.gnd_bond(),
-                            self.dev.files(),
-                            self.dev.steps_per_file(),
+                            &self.steps,
+                            self.dev.ac_hipot_test(),
+                            self.dev.gnd_bond_test(),
+                            self.dev.sequences(),
+                            self.dev.steps_per_sequence(),
                         )
                         .ok_or(std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     
@@ -1009,11 +1056,11 @@ macro_rules! define_device
 
 define_device!{
     model: sci_4520,
-    files: 6,
-    steps_per_file: 6,
+    multi_sequence: Yes(6),
+    steps_per_sequence: 6,
     supported_tests: [
-        ac_hipot {
-            limits: AcHipotLimits {
+        ac_hipot_test {
+            limits: AcHipotDeviceLimits {
                 voltage_min: Volt::from_whole(1000),
                 voltage_max: Volt::from_whole(5000),
                 dwell_min: Duration::from_millis(500),
@@ -1024,8 +1071,8 @@ define_device!{
                 ramp_max: Duration::from_millis(999_900),
             }
         },
-        gnd_bond {
-            limits: GndBondLimits {
+        gnd_bond_test {
+            limits: GndBondDeviceLimits {
                 check_current_min: Amp::from_whole(3),
                 check_current_max: Amp::from_whole(30),
                 dwell_min: Duration::from_millis(500),
