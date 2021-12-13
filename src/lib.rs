@@ -1010,35 +1010,38 @@ macro_rules! impl_test_editor
             self
         }
     };
-    (display_multi_seq: No) => {
-        CmdSet::display_sci_single
+    (commit AssociatedResearch Yes) => {
+        CmdSet::display_ar
     };
-    (display_multi_seq: Yes) => {
+    (commit Sci Yes) => {
         CmdSet::display_sci_multi
+    };
+    (commit Sci No) => {
+        CmdSet::display_sci_single
     };
 }
 
 macro_rules! impl_device
 {
-    {spawn_multisequence_editor: No} => {
+    {edit_sequence Sci No} => {
         pub fn edit_sequence<'h>(&'h mut self) -> TestEditor<'h, T>
         {
             TestEditor::new(self, 1)
         }
     };
-    {spawn_multisequence_editor: Yes} => {
+    {edit_sequence $brand:ident Yes} => {
         pub fn edit_sequence<'h>(&'h mut self, sequence_num: u32) -> TestEditor<'h, T>
         {
             TestEditor::new(self, sequence_num)
         }
     };
-    {sequence_count: No} => {
+    {sequences No} => {
         pub fn sequences(&self) -> u32
         {
             1
         }
     };
-    {sequence_count: Yes($steps:literal)} => {
+    {sequences Yes($steps:literal)} => {
         pub fn sequences(&self) -> u32
         {
             $steps
@@ -1052,10 +1055,16 @@ macro_rules! impl_device
 /// should be a module-friendly name e.g. `sci_4520`.
 macro_rules! define_device
 {
-    { model: $dev:ident, multi_sequence: $qualifier:ident $(($sequences:literal))?, steps_per_sequence: $steps:literal, supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+] } => {
+    {
+        model: $dev:ident,
+        brand: $brand:ident,
+        multi_sequence: $qualifier:ident $(($sequences:literal))?,
+        steps_per_sequence: $steps:literal,
+        supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+]
+    } => {
         mod $dev {
             use super::{Amp, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
-                exec_all, StepInfo, TestParams, CmdSet,
+                exec_all, StepInfo, TestParams, CmdSet
             };
             use std::time::Duration;
             use tokio::io::{ AsyncReadExt, AsyncWriteExt };
@@ -1067,7 +1076,7 @@ macro_rules! define_device
 
             impl <T> Device<T>
             {
-                impl_device!{sequence_count: $qualifier$(($sequences))*}
+                impl_device!{sequences $qualifier$(($sequences))*}
                 // pub fn sequences(&self) -> u32
                 // {
                 //     $files
@@ -1089,7 +1098,7 @@ macro_rules! define_device
                     }
                 }
 
-                impl_device!{spawn_multisequence_editor: $qualifier}
+                impl_device!{edit_sequence $brand $qualifier}
                 // pub fn edit_test<'h>(&'h mut self, file_num: u32) -> TestEditor<'h, T>
                 // {
                 //     TestEditor {
@@ -1162,7 +1171,7 @@ macro_rules! define_device
                         )
                         .ok_or(std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     
-                    exec_all(&mut self.dev.io_handle, &cmds, impl_test_editor!(display_multi_seq: $qualifier)).await
+                    exec_all(&mut self.dev.io_handle, &cmds, impl_test_editor!(commit $brand $qualifier)).await
                 }
 
                 $(impl_test_editor!{$test_type})+
@@ -1173,6 +1182,7 @@ macro_rules! define_device
 
 define_device!{
     model: sci_4520,
+    brand: Sci,
     multi_sequence: Yes(6),
     steps_per_sequence: 6,
     supported_tests: [
@@ -1205,6 +1215,7 @@ define_device!{
 
 define_device!{
     model: sci_448,
+    brand: Sci,
     multi_sequence: No,
     steps_per_sequence: 20,
     supported_tests: [
@@ -1235,8 +1246,42 @@ define_device!{
     ]
 }
 
+define_device!{
+    model: ar_7704,
+    brand: AssociatedResearch,
+    multi_sequence: Yes(3),
+    steps_per_sequence: 8,
+    supported_tests: [
+        ac_hipot_test {
+            limits: AcHipotDeviceLimits {
+                voltage_min: Volt::from_whole(1000),
+                voltage_max: Volt::from_whole(5000),
+                dwell_min: Duration::from_millis(500),
+                dwell_max: Duration::from_millis(999_900),
+                leak_current_min: Amp::from_whole(0),
+                leak_current_max: Amp::from_micros(99_990),
+                ramp_min: Duration::from_millis(100),
+                ramp_max: Duration::from_millis(999_900),
+            }
+        },
+        gnd_bond_test {
+            limits: GndBondDeviceLimits {
+                check_current_min: Amp::from_whole(3),
+                check_current_max: Amp::from_whole(30),
+                dwell_min: Duration::from_millis(500),
+                dwell_max: Duration::from_millis(999_900),
+                offset_min: Ohm::from_whole(0),
+                offset_max: Ohm::from_millis(100),
+                resistance_min: Ohm::from_millis(0),
+                resistance_max: Ohm::from_millis(510),
+            }
+        }
+    ]
+}
+
 pub use sci_4520::{ Device as Sci4520, TestEditor as Sci4520TestEditor };
 pub use sci_448::{ Device as Sci448, TestEditor as Sci448TestEditor };
+pub use ar_7704::{ Device as Ar7704, TestEditor as Ar7704TestEditor };
 /*
 device
     .edit_test(1)
