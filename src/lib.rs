@@ -359,12 +359,32 @@ pub enum AcFrequency
     Hz60,
 }
 
+enum GndBondParam
+{
+    Frequency(AcFrequency),
+    DwellTime(Duration),
+    CheckCurrent(Amp),
+    ResistanceMax(Ohm),
+    ResistanceMin(Ohm),
+    Offset(Ohm),
+}
+
+enum AcHipotParam
+{
+    Frequency(AcFrequency),
+    DwellTime(Duration),
+    RampTime(Duration),
+    Voltage(Volt),
+    LeakageMax(Amp),
+    LeakageMin(Amp),
+}
+
 enum CmdSet
 {
     /// Ready a test file stored on the device for execution and editing
     ///
     /// Command: `FL <file_number>`
-    LoadFile(u32),
+    LoadSequence(u32),
     /// Select a step in the currently loaded file
     ///
     /// Command: `SS <step_number>`
@@ -382,88 +402,177 @@ enum CmdSet
     ///
     /// Command: `ECC <1|0>`
     ContinueToNext(bool),
-    /// On the currently selected step, set the electrical current used to check the quality of the
-    /// ground connection in amperes. Applicable only if the current step is a ground
-    /// bond test.
-    ///
-    /// Command: `EC <amps>`
-    SetGndCheckCurrent(Amp),
-    /// On the currently selected step, set the dwell time of the primary test current in seconds.
-    /// Applicable only if the current step is an AC or DC hipot or ground bond.
-    ///
-    /// Command: `EDW <seconds>`
-    SetDwell(Duration),
-    /// On the currently selected step, set the AC frequency to be used i.e. 50 or 60 Hz. Applicable
-    /// only if the current step is an AC hipot or ground bond.
-    ///
-    /// Command: `EF <1|0>`
-    SetAcFrequency(AcFrequency),
-    /// On the currently selected step, set the maximum allowble leakage current when running an AC
-    /// or DC hipot test. Tenth-milliamp precision.
-    ///
-    /// Command: `EH <milliamp>`
-    SetLeakCurrentHiLimit(Amp),
-    /// On the currently selected step, set the minimum allowable leakage current when running an AC
-    /// or DC hipot test. Tenth-milliamp precison.
-    ///
-    /// Command: `EL <milliamp>`
-    SetLeakCurrentLoLimit(Amp),
-    /// On the currently selected step, set the maximum allowable ground line resistance when
-    /// running a ground bond test.
-    ///
-    /// Command: `EH <milliohm>`
-    SetResistanceHiLimit(Ohm),
-    /// On the currently selected step, set the minimum allowable ground line resistance when
-    /// running a ground bond test.
-    ///
-    /// Command: `EH <milliohm>`
-    SetResistanceLoLimit(Ohm),
-    /// On the currently selected step, set the ground connection resistance offset in milliohms.
-    /// Applicable only to ground bond tests.
-    ///
-    /// Command: `EO <milliohm>`
-    SetGndOffset(Ohm),
-    /// On the currently selected step, set the time it takes to ramp up the voltage to the
-    /// full test load. Applicable only to AC and DC hipot tests.
-    ///
-    /// Command: `ERU <seconds>`
-    SetRampTime(Duration),
-    /// On the currently selected step, set the high-potential voltage used. Only applicable to AC
-    /// and DC hipot tests.
-    ///
-    /// Command: `EV <kilovolt>`
-    SetHipotVoltage(Volt),
+    SetAcHipotParam(AcHipotParam),
+    SetGndBondParam(GndBondParam),
 }
 
-impl fmt::Display for CmdSet
+impl CmdSet
+{
+    fn display_sci_multi<'a>(&'a self) -> SciMultiSeqDisplay<'a>
+    {
+        SciMultiSeqDisplay::new(self)
+    }
+
+    fn display_sci_single<'a>(&'a self) -> SciSingleSeqDisplay<'a>
+    {
+        SciSingleSeqDisplay::new(self)
+    }
+
+    fn display_ar<'a>(&'a self) -> AssociatedResearchDisplay<'a>
+    {
+        AssociatedResearchDisplay::new(self)
+    }
+}
+
+// enum CmdFamily
+// {
+//     SciMultiSequence,
+//     SciSingleSequence,
+//     AssociatedResearch,
+// }
+
+fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
+{
+    match cmd {
+        CmdSet::SetAcHipot => write!(f, "SAA"),
+        CmdSet::SetGndBond => write!(f, "SAG"),
+        CmdSet::ContinueToNext(cont) => write!(f, "ECC {}", if *cont { '1' } else { '0' }),
+        CmdSet::SetAcHipotParam(param) => match param {
+            AcHipotParam::Frequency(frequency) => write!(
+                f,
+                "EF {}",
+                match frequency {
+                    AcFrequency::Hz50 => '0',
+                    AcFrequency::Hz60 => '1',
+                }
+            ),
+            AcHipotParam::DwellTime(seconds) => write!(f, "EDW {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+            AcHipotParam::RampTime(seconds) => write!(f, "ERU {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+            AcHipotParam::Voltage(voltage) => write!(f, "EV {}", voltage.value.display_kilo(2)),
+            AcHipotParam::LeakageMax(leak_current) => write!(f, "EH {}", leak_current.value.display_milli(1)),
+            AcHipotParam::LeakageMin(leak_current) => write!(f, "EL {}", leak_current.value.display_milli(1)),
+        },
+        CmdSet::SetGndBondParam(param) => match param {
+            GndBondParam::Frequency(frequency) => write!(
+                f,
+                "EF {}",
+                match frequency {
+                    AcFrequency::Hz50 => '0',
+                    AcFrequency::Hz60 => '1',
+                }
+            ),
+            GndBondParam::DwellTime(seconds) => write!(f, "EDW {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+            GndBondParam::CheckCurrent(check_current) => write!(f, "EC {}", check_current.display(1)),
+            GndBondParam::ResistanceMax(resistance) => write!(f, "EH {}", resistance.value.display_milli(0)),
+            GndBondParam::ResistanceMin(resistance) => write!(f, "EL {}", resistance.value.display_milli(0)),
+            GndBondParam::Offset(offset) => write!(f, "EO {}", offset.value.display_milli(0)),
+        },
+        CmdSet::LoadSequence(_) => panic!("`LoadSequence` command is not a stable command across devices"),
+        CmdSet::SelectStep(_) => panic!("`SelectStep` command is not a stable command across devices"),
+    }
+}
+
+struct SciMultiSeqDisplay<'a>
+{
+    cmd: &'a CmdSet,
+}
+
+impl <'a> SciMultiSeqDisplay<'a>
+{
+    fn new(cmd: &'a CmdSet) -> Self
+    {
+        Self {
+            cmd: cmd
+        }
+    }
+}
+
+impl <'a> fmt::Display for SciMultiSeqDisplay<'a>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
-        match self {
-            Self::LoadFile(file_num) => write!(f, "FL {}", file_num),
-            Self::SelectStep(step_num) => write!(f, "SS {}", step_num),
-            Self::SetAcHipot => write!(f, "SAA"),
-            Self::SetGndBond => write!(f, "SAG"),
-            Self::ContinueToNext(cont) => write!(f, "ECC {}", if *cont { '1' } else { '0' }),
-            Self::SetGndCheckCurrent(check_current) => write!(f, "EC {}", check_current.display(1)),
-            Self::SetDwell(seconds) => write!(f, "EDW {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-            Self::SetAcFrequency(frequency) => {
-                write!(
-                    f,
-                    "EF {}",
-                    match frequency {
-                        AcFrequency::Hz50 => '0',
-                        AcFrequency::Hz60 => '1',
-                    }
-                )
+        match self.cmd {
+            CmdSet::LoadSequence(file_num) => write!(f, "FL {}", file_num),
+            CmdSet::SelectStep(step_num) => write!(f, "SS {}", step_num),
+            _ => display_sci_core(self.cmd, f),
+        }
+    }
+}
+
+struct SciSingleSeqDisplay<'a>
+{
+    cmd: &'a CmdSet,
+}
+
+impl <'a> SciSingleSeqDisplay<'a>
+{
+    fn new(cmd: &'a CmdSet) -> Self
+    {
+        Self {
+            cmd: cmd
+        }
+    }
+}
+
+impl <'a> fmt::Display for SciSingleSeqDisplay<'a>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        match self.cmd {
+            CmdSet::LoadSequence(file_num) => panic!("`LoadSequence` is not supported on SCI single-sequence devices"),
+            CmdSet::SelectStep(step_num) => write!(f, "FL {}", step_num),
+            _ => display_sci_core(self.cmd, f),
+        }
+    }
+}
+
+struct AssociatedResearchDisplay<'a>
+{
+    cmd: &'a CmdSet,
+}
+
+impl <'a> AssociatedResearchDisplay<'a>
+{
+    fn new(cmd: &'a CmdSet) -> Self
+    {
+        Self {
+            cmd: cmd
+        }
+    }
+}
+
+impl <'a> fmt::Display for AssociatedResearchDisplay<'a>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        match self.cmd {
+            CmdSet::LoadSequence(sequence_num) => write!(f, "S5 {}", sequence_num),
+            CmdSet::SelectStep(step_num) => write!(f, "S6 {}", step_num),
+            CmdSet::SetAcHipot => write!(f, "FC"),
+            CmdSet::SetGndBond => write!(f, "FF"),
+            CmdSet::ContinueToNext(cont) => if *cont { write!(f, "FQ") } else { write!(f, "FR") },
+            CmdSet::SetAcHipotParam(param) => match param {
+                AcHipotParam::Frequency(frequency) => match frequency {
+                    AcFrequency::Hz50 => write!(f, "FJ"),
+                    AcFrequency::Hz60 => write!(f, "FI"),
+                },
+                AcHipotParam::DwellTime(seconds) => write!(f, "SE {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+                AcHipotParam::RampTime(seconds) => write!(f, "SD {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+                AcHipotParam::Voltage(voltage) => write!(f, "SA {}", voltage.value.display_kilo(2)),
+                AcHipotParam::LeakageMax(leak_current) => write!(f, "SB {}", leak_current.value.display_milli(1)),
+                AcHipotParam::LeakageMin(leak_current) => write!(f, "SC {}", leak_current.value.display_milli(1)),
             },
-            Self::SetLeakCurrentHiLimit(leak_current) => write!(f, "EH {}", leak_current.value.display_milli(1)),
-            Self::SetLeakCurrentLoLimit(leak_current) => write!(f, "EL {}", leak_current.value.display_milli(1)),
-            Self::SetResistanceHiLimit(resistance) => write!(f, "EH {}", resistance.value.display_milli(0)),
-            Self::SetResistanceLoLimit(resistance) => write!(f, "EL {}", resistance.value.display_milli(0)),
-            Self::SetGndOffset(offset) => write!(f, "EO {}", offset.value.display_milli(0)),
-            Self::SetRampTime(seconds) => write!(f, "ERU {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-            Self::SetHipotVoltage(voltage) => write!(f, "EV {}", voltage.value.display_kilo(2)),
+            CmdSet::SetGndBondParam(param) => match param {
+                GndBondParam::Frequency(frequency) => match frequency {
+                    AcFrequency::Hz50 => write!(f, "FP"),
+                    AcFrequency::Hz60 => write!(f, "FO"),
+                },
+                GndBondParam::DwellTime(seconds) => write!(f, "S2 {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
+                GndBondParam::CheckCurrent(check_current) => write!(f, "SY {}", check_current.display(1)),
+                GndBondParam::ResistanceMax(resistance) => write!(f, "S0 {}", resistance.value.display_milli(0)),
+                GndBondParam::ResistanceMin(resistance) => write!(f, "S1 {}", resistance.value.display_milli(0)),
+                GndBondParam::Offset(offset) => write!(f, "S4 {}", offset.value.display_milli(0)),
+            },
         }
     }
 }
@@ -476,16 +585,17 @@ impl fmt::Display for CmdSet
 /// depending on the nature if the command. If the command asks the device set up a test it does not
 /// support -- e.g. a ground bond when it is a hipot-only tester -- then an I/O error with the kind
 /// `Unsupported` is returned. In all other NAK cases, `InvalidData` is returned.
-async fn exec_cmd<T>(io_handle: &mut T, cmd: &CmdSet) -> Result<(), io::Error>
-    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+async fn exec_cmd<'a, T, D>(io_handle: &mut T, cmd: &'a CmdSet, display_func: fn(&'a CmdSet) -> D) -> Result<(), io::Error>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+          D: fmt::Display,
 {
-    let serialized = format!("{}\n", cmd);
+    let serialized = format!("{}\n", display_func(cmd));
     io_handle.write_all(serialized.as_bytes()).await?;
     let response = io_handle.read_u16().await?;
 
-    // TODO this is a quick hack to work around unknown endianness behavior and lack of buffering
-    // This really should be replaced with a read of exactly 2 bytes and a buffer comparison
-    if response != 0x060A && response != 0x0A06 {
+    // The AsyncReadExt trait guarantees the endianness so this check will always work.
+    // There are separate methods for reading little endian numbers
+    if response != 0x060A {
         Err(io::Error::from(io::ErrorKind::InvalidInput))
     }
     else {
@@ -493,11 +603,12 @@ async fn exec_cmd<T>(io_handle: &mut T, cmd: &CmdSet) -> Result<(), io::Error>
     }
 }
 
-async fn exec_all<T>(io_handle: &mut T, cmds: &[CmdSet]) -> Result<(), io::Error>
-    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+async fn exec_all<'a, T, D>(io_handle: &mut T, cmds: &'a [CmdSet], display_func: fn(&'a CmdSet) -> D) -> Result<(), io::Error>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+          D: fmt::Display,
 {
     for cmd in cmds.iter() {
-        exec_cmd(io_handle, cmd).await?;
+        exec_cmd(io_handle, cmd, display_func).await?;
     }
 
     Ok(())
@@ -717,7 +828,7 @@ impl TestEditor
             return None;
         }
 
-        let mut cmds = vec![CmdSet::LoadFile(self.sequence_num)];
+        let mut cmds = vec![CmdSet::LoadSequence(self.sequence_num)];
 
         for step in step_buf {
             if step.is_none() {
@@ -746,14 +857,14 @@ impl TestEditor
                             if voltage > ac_hipot_limits.voltage_max || voltage < ac_hipot_limits.voltage_min {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetHipotVoltage(voltage));
+                            cmds.push(CmdSet::SetAcHipotParam(AcHipotParam::Voltage(voltage)));
                         }
 
                         if let Some(dwell) = params.dwell {
                             if dwell > ac_hipot_limits.dwell_max || dwell < ac_hipot_limits.dwell_min {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetDwell(dwell));
+                            cmds.push(CmdSet::SetAcHipotParam(AcHipotParam::DwellTime(dwell)));
                         }
 
                         if let Some(leak_current_min) = params.leak_current_min {
@@ -762,7 +873,7 @@ impl TestEditor
                             {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetLeakCurrentLoLimit(leak_current_min));
+                            cmds.push(CmdSet::SetAcHipotParam(AcHipotParam::LeakageMin(leak_current_min)));
                         }
 
                         if let Some(leak_current_max) = params.leak_current_max {
@@ -771,18 +882,18 @@ impl TestEditor
                             {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetLeakCurrentHiLimit(leak_current_max));
+                            cmds.push(CmdSet::SetAcHipotParam(AcHipotParam::LeakageMax(leak_current_max)));
                         }
 
                         if let Some(ramp) = params.ramp {
                             if ramp > ac_hipot_limits.ramp_max || ramp < ac_hipot_limits.ramp_min {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetRampTime(ramp));
+                            cmds.push(CmdSet::SetAcHipotParam(AcHipotParam::RampTime(ramp)));
                         }
 
                         if let Some(frequency) = params.frequency {
-                            cmds.push(CmdSet::SetAcFrequency(frequency));
+                            cmds.push(CmdSet::SetAcHipotParam(AcHipotParam::Frequency(frequency)));
                         }
                     },
                     TestParams::GndBond(params) => {
@@ -795,14 +906,14 @@ impl TestEditor
                             {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetGndCheckCurrent(check_current));
+                            cmds.push(CmdSet::SetGndBondParam(GndBondParam::CheckCurrent(check_current)));
                         }
 
                         if let Some(dwell) = params.dwell {
                             if dwell > gnd_bond_limits.dwell_max || dwell < gnd_bond_limits.dwell_min {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetDwell(dwell));
+                            cmds.push(CmdSet::SetGndBondParam(GndBondParam::DwellTime(dwell)));
                         }
 
                         if let Some(resistance_min) = params.resistance_min {
@@ -811,7 +922,7 @@ impl TestEditor
                             {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetResistanceLoLimit(resistance_min));
+                            cmds.push(CmdSet::SetGndBondParam(GndBondParam::ResistanceMin(resistance_min)));
                         }
 
                         if let Some(resistance_max) = params.resistance_max {
@@ -820,18 +931,18 @@ impl TestEditor
                             {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetResistanceHiLimit(resistance_max));
+                            cmds.push(CmdSet::SetGndBondParam(GndBondParam::ResistanceMax(resistance_max)));
                         }
 
                         if let Some(offset) = params.offset {
                             if offset > gnd_bond_limits.offset_max || offset < gnd_bond_limits.offset_min {
                                 return None;
                             }
-                            cmds.push(CmdSet::SetGndOffset(offset));
+                            cmds.push(CmdSet::SetGndBondParam(GndBondParam::Offset(offset)));
                         }
 
                         if let Some(frequency) = params.frequency {
-                            cmds.push(CmdSet::SetAcFrequency(frequency));
+                            cmds.push(CmdSet::SetGndBondParam(GndBondParam::Frequency(frequency)));
                         }
                     }
                 }
@@ -899,6 +1010,12 @@ macro_rules! impl_test_editor
             self
         }
     };
+    (display_multi_seq: No) => {
+        CmdSet::display_sci_single
+    };
+    (display_multi_seq: Yes) => {
+        CmdSet::display_sci_multi
+    };
 }
 
 macro_rules! impl_device
@@ -938,7 +1055,7 @@ macro_rules! define_device
     { model: $dev:ident, multi_sequence: $qualifier:ident $(($sequences:literal))?, steps_per_sequence: $steps:literal, supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+] } => {
         mod $dev {
             use super::{Amp, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
-                exec_all, StepInfo, TestParams
+                exec_all, StepInfo, TestParams, CmdSet,
             };
             use std::time::Duration;
             use tokio::io::{ AsyncReadExt, AsyncWriteExt };
@@ -1045,7 +1162,7 @@ macro_rules! define_device
                         )
                         .ok_or(std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     
-                    exec_all(&mut self.dev.io_handle, &cmds).await
+                    exec_all(&mut self.dev.io_handle, &cmds, impl_test_editor!(display_multi_seq: $qualifier)).await
                 }
 
                 $(impl_test_editor!{$test_type})+
@@ -1156,7 +1273,7 @@ device
 
 #[cfg(test)]
 mod tests {
-    use super::{ Amp, Ohm, Volt, CmdSet, AcFrequency};
+    use super::{ Amp, Ohm, Volt, CmdSet, AcFrequency, GndBondParam, AcHipotParam};
     use std::time::Duration;
 
     #[test]
@@ -1238,25 +1355,48 @@ mod tests {
     }
 
     #[test]
-    fn serialize_cmd_set()
+    fn serialize_sci_core()
     {
-        assert_eq!(&format!("{}", CmdSet::LoadFile(3)), "FL 3");
-        assert_eq!(&format!("{}", CmdSet::SelectStep(1)), "SS 1");
-        assert_eq!(&format!("{}", CmdSet::SetAcHipot,), "SAA");
-        assert_eq!(&format!("{}", CmdSet::SetGndBond,), "SAG");
-        assert_eq!(&format!("{}", CmdSet::ContinueToNext(true)), "ECC 1");
-        assert_eq!(&format!("{}", CmdSet::ContinueToNext(false)), "ECC 0");
-        assert_eq!(&format!("{}", CmdSet::SetGndCheckCurrent(Amp::from_whole(25))), "EC 25.0");
-        assert_eq!(&format!("{}", CmdSet::SetDwell(Duration::from_millis(2_345))), "EDW 2.3");
-        assert_eq!(&format!("{}", CmdSet::SetAcFrequency(AcFrequency::Hz50)), "EF 0");
-        assert_eq!(&format!("{}", CmdSet::SetAcFrequency(AcFrequency::Hz60)), "EF 1");
-        assert_eq!(&format!("{}", CmdSet::SetLeakCurrentHiLimit(Amp::from_micros(67_800))), "EH 67.8");
-        assert_eq!(&format!("{}", CmdSet::SetLeakCurrentLoLimit(Amp::from_micros(0))), "EL 0.0");
-        assert_eq!(&format!("{}", CmdSet::SetResistanceHiLimit(Ohm::from_millis(128))), "EH 128");
-        assert_eq!(&format!("{}", CmdSet::SetResistanceLoLimit(Ohm::from_millis(0))), "EL 0");
-        assert_eq!(&format!("{}", CmdSet::SetGndOffset(Ohm::from_millis(56))), "EO 56");
-        assert_eq!(&format!("{}", CmdSet::SetRampTime(Duration::from_millis(4_321))), "ERU 4.3");
-        assert_eq!(&format!("{}", CmdSet::SetHipotVoltage(Volt::from_whole(1250))), "EV 1.25");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipot.display_sci_single()), "SAA");
+        assert_eq!(&format!("{}", CmdSet::SetGndBond.display_sci_single()), "SAG");
+        assert_eq!(&format!("{}", CmdSet::ContinueToNext(true).display_sci_single()), "ECC 1");
+        assert_eq!(&format!("{}", CmdSet::ContinueToNext(false).display_sci_single()), "ECC 0");
+
+        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::CheckCurrent(Amp::from_whole(25))).display_sci_single()), "EC 25.0");
+        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::DwellTime(Duration::from_millis(2_345))).display_sci_single()), "EDW 2.3");
+        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz50)).display_sci_single()), "EF 0");
+        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz60)).display_sci_single()), "EF 1");
+        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::ResistanceMax(Ohm::from_millis(128))).display_sci_single()), "EH 128");
+        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::ResistanceMin(Ohm::from_millis(0))).display_sci_single()), "EL 0");
+        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::Offset(Ohm::from_millis(56))).display_sci_single()), "EO 56");
+
+        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz50)).display_sci_single()), "EF 0");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz60)).display_sci_single()), "EF 1");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::LeakageMax(Amp::from_micros(67_800))).display_sci_single()), "EH 67.8");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::LeakageMin(Amp::from_micros(0))).display_sci_single()), "EL 0.0");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::RampTime(Duration::from_millis(4_321))).display_sci_single()), "ERU 4.3");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::Voltage(Volt::from_whole(1250))).display_sci_single()), "EV 1.25");
+        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::DwellTime(Duration::from_millis(2_345))).display_sci_single()), "EDW 2.3");
+    }
+
+    #[test]
+    fn serialize_sci_multi_seq()
+    {
+        assert_eq!(&format!("{}", CmdSet::LoadSequence(3).display_sci_multi()), "FL 3");
+        assert_eq!(&format!("{}", CmdSet::SelectStep(1).display_sci_multi()), "SS 1");
+    }
+
+    #[test]
+    fn serialize_sci_single_seq()
+    {
+        assert_eq!(&format!("{}", CmdSet::SelectStep(1).display_sci_single()), "FL 1");
+    }
+
+    #[test]
+    #[should_panic]
+    fn sci_single_load_seq_panics()
+    {
+        format!("{}", CmdSet::LoadSequence(1).display_sci_single());
     }
 
     #[test]
