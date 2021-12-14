@@ -404,6 +404,13 @@ enum CmdSet
     ContinueToNext(bool),
     SetAcHipotParam(AcHipotParam),
     SetGndBondParam(GndBondParam),
+    /// Run the currently loaded test starting at the currently selected step
+    RunTest,
+    /// Reset the device to a ready-to-run state, cancelling any active test but preserving tests in
+    /// memory.
+    SoftReset,
+    /// Gets the test data for the given step
+    GetTestData(u32),
 }
 
 impl CmdSet
@@ -423,13 +430,6 @@ impl CmdSet
         AssociatedResearchDisplay::new(self)
     }
 }
-
-// enum CmdFamily
-// {
-//     SciMultiSequence,
-//     SciSingleSequence,
-//     AssociatedResearch,
-// }
 
 fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
 {
@@ -467,6 +467,9 @@ fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
             GndBondParam::ResistanceMin(resistance) => write!(f, "EL {}", resistance.value.display_milli(0)),
             GndBondParam::Offset(offset) => write!(f, "EO {}", offset.value.display_milli(0)),
         },
+        CmdSet::RunTest => write!(f, "TEST"),
+        CmdSet::SoftReset => write!(f, "RESET"),
+        CmdSet::GetTestData(step_num) => write!(f, "RD {}?", step_num),
         CmdSet::LoadSequence(_) => panic!("`LoadSequence` command is not a stable command across devices"),
         CmdSet::SelectStep(_) => panic!("`SelectStep` command is not a stable command across devices"),
     }
@@ -573,46 +576,207 @@ impl <'a> fmt::Display for AssociatedResearchDisplay<'a>
                 GndBondParam::ResistanceMin(resistance) => write!(f, "S1 {}", resistance.value.display_milli(0)),
                 GndBondParam::Offset(offset) => write!(f, "S4 {}", offset.value.display_milli(0)),
             },
+            CmdSet::RunTest => write!(f, "FA"),
+            CmdSet::SoftReset => write!(f, "FB"),
+            CmdSet::GetTestData(step_num) => write!(f, "?{}", step_num),
         }
     }
 }
 
-/// Executes the given command, sending to the device and checking the response
-///
-/// When the device responds with a positive ACK, `Ok` is returned. When an error occurrs on
-/// reading/writing to the stream, `Err` is returned. When the command is successfully written and
-/// the device responds with a negative ACK (NAK), an error is returned with an `ErrorKind`
-/// depending on the nature if the command. If the command asks the device set up a test it does not
-/// support -- e.g. a ground bond when it is a hipot-only tester -- then an I/O error with the kind
-/// `Unsupported` is returned. In all other NAK cases, `InvalidData` is returned.
-async fn exec_cmd<'a, T, D>(io_handle: &mut T, cmd: &'a CmdSet, display_func: fn(&'a CmdSet) -> D) -> Result<(), io::Error>
-    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
-          D: fmt::Display,
+struct Executor<T>
 {
-    let serialized = format!("{}\n", display_func(cmd));
-    io_handle.write_all(serialized.as_bytes()).await?;
-    let response = io_handle.read_u16().await?;
+    line_ending: &'static str,
+    io_handle: T,
+    read_buf: Vec<u8>,
+}
 
-    // The AsyncReadExt trait guarantees the endianness so this check will always work.
-    // There are separate methods for reading little endian numbers
-    if response != 0x060A {
-        Err(io::Error::from(io::ErrorKind::InvalidInput))
+impl <T> Executor<T>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+{
+    fn with(line_ending: &'static str, io_handle: T) -> Self
+    {
+        Self {
+            line_ending: line_ending,
+            io_handle: io_handle,
+            read_buf: Vec::with_capacity(128),
+        }
     }
-    else {
+
+    /// Drops the first `n` bytes from the read buffer
+    ///
+    /// Drops all bytes if `n >= self.read_buf.len()`
+    fn drop_first(&mut self, n: usize)
+    {
+        if n >= self.read_buf.len() {
+            self.read_buf.clear();
+        }
+        else {
+            // relocate any bytes after the Nth byte to index 0
+            self.read_buf.rotate_left(n);
+            // chop off the bytes we just consumed
+            self.read_buf.truncate(self.read_buf.len() - n);
+            // shrink the buffer's allocation to keep memory usage down
+            self.read_buf.shrink_to(128);
+        }
+    }
+
+    fn find_line_ending(&self, start_hint: usize) -> Option<usize>
+    {
+        for index in start_hint..self.read_buf.len() {
+            if self.read_buf[index] == 0x0A {
+                return Some(index);
+            }
+        }
+
+        None
+    }
+
+    /// Reads a line (series of bytes terminated by `LF` / 0x0A) into the read buffer and returns
+    /// how many bytes are in the line
+    ///
+    /// On Error all bytes buffered are destroyed
+    async fn read_line(&mut self) -> Result<usize, std::io::Error>
+    {
+        let mut total_bytes_read = 0;
+        // try to find the ending in already-buffered data first
+        let mut end_index = self.find_line_ending(0);
+
+        while end_index.is_none() {
+            // TODO this could avoid a double copy with some unsafe trickery
+            // fully initialize the vector and then use slicing to write directly into it
+            // however this requires manually setting the length field which is tricky to get right
+            let mut temp_buf = [0u8; 64];
+
+            match self.io_handle.read(&mut temp_buf[..]).await {
+                Ok(bytes_read) => {
+                    total_bytes_read += bytes_read;
+                    self.read_buf.extend_from_slice(&temp_buf[..bytes_read]);
+                    end_index = self.find_line_ending(total_bytes_read);
+                }
+                Err(err) => {
+                    self.read_buf.clear();
+                    return Err(err);
+                }
+            }
+        }
+
+        return Ok(end_index.unwrap() + 1);
+    }
+
+    /// Executes the given command, sending to the device and checking the response
+    ///
+    /// When the device responds with a positive ACK, `Ok` is returned. When an error occurrs on
+    /// reading/writing to the stream, `Err` is returned. When the command is successfully written and
+    /// the device responds with a negative ACK (NAK), an error is returned with an `ErrorKind`
+    /// depending on the nature if the command. If the command asks the device set up a test it does not
+    /// support -- e.g. a ground bond when it is a hipot-only tester -- then an I/O error with the kind
+    /// `Unsupported` is returned. In all other NAK cases, `InvalidData` is returned.
+    async fn exec_cmd<'a, D>(&mut self, cmd: &'a CmdSet, display_func: fn(&'a CmdSet) -> D) -> Result<usize, io::Error>
+        where D: fmt::Display,
+    {
+        let serialized = format!("{}{}", display_func(cmd), self.line_ending);
+        self.io_handle.write_all(serialized.as_bytes()).await?;
+        let response_len = self.read_line().await?;
+
+        if response_len < 2 || self.read_buf[0] == 0x15 {
+            self.drop_first(response_len);
+            Err(io::Error::from(io::ErrorKind::InvalidInput))
+        }
+        else {
+            Ok(response_len)
+        }
+    }
+
+    async fn exec_all<'a, D>(&mut self, cmds: &'a [CmdSet], display_func: fn(&'a CmdSet) -> D) -> Result<(), io::Error>
+        where D: fmt::Display
+    {
+        for cmd in cmds.iter() {
+            let response_len = self.exec_cmd(cmd, display_func).await?;
+            self.drop_first(response_len);
+        }
+
         Ok(())
     }
 }
 
-async fn exec_all<'a, T, D>(io_handle: &mut T, cmds: &'a [CmdSet], display_func: fn(&'a CmdSet) -> D) -> Result<(), io::Error>
-    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
-          D: fmt::Display,
+struct SciSingleExecutor<T>
 {
-    for cmd in cmds.iter() {
-        exec_cmd(io_handle, cmd, display_func).await?;
+    delegate: Executor<T>,
+}
+
+impl <T> SciSingleExecutor<T>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+{
+    fn with(io_handle: T) -> Self
+    {
+        Self {
+            delegate: Executor::with("\n", io_handle),
+        }
     }
 
-    Ok(())
+    async fn exec_cmd(&mut self, cmd: &CmdSet) -> Result<usize, std::io::Error>
+    {
+        self.delegate.exec_cmd(cmd, CmdSet::display_sci_single).await
+    }
+
+    async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), std::io::Error>
+    {
+        self.delegate.exec_all(cmds, CmdSet::display_sci_single).await
+    }
 }
+
+struct SciMultiExecutor<T>
+{
+    delegate: Executor<T>,
+}
+
+impl <T> SciMultiExecutor<T>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+{
+    fn with(io_handle: T) -> Self
+    {
+        Self {
+            delegate: Executor::with("\n", io_handle),
+        }
+    }
+
+    async fn exec_cmd(&mut self, cmd: &CmdSet) -> Result<usize, std::io::Error>
+    {
+        self.delegate.exec_cmd(cmd, CmdSet::display_sci_multi).await
+    }
+
+    async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), std::io::Error>
+    {
+        self.delegate.exec_all(cmds, CmdSet::display_sci_multi).await
+    }
+}
+
+struct ArExecutor<T>
+{
+    delegate: Executor<T>,
+}
+
+impl <T> ArExecutor<T>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+{
+    fn with(io_handle: T) -> Self
+    {
+        Self {
+            delegate: Executor::with("\r\n", io_handle),
+        }
+    }
+
+    async fn exec_cmd(&mut self, cmd: &CmdSet) -> Result<usize, std::io::Error>
+    {
+        self.delegate.exec_cmd(cmd, CmdSet::display_ar).await
+    }
+
+    async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), std::io::Error>
+    {
+        self.delegate.exec_all(cmds, CmdSet::display_ar).await
+    }
+}
+
 
 pub enum AcHipotOutcome
 {
@@ -673,7 +837,7 @@ impl fmt::Display for ParseTestStatusErr
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
-        write!(f, "Unrecognized status. Acceptable test statuses are ['OFL', 'HI-Lmt', 'LO-Lmt', 'Ramp', 'Dwell', 'Abort', 'Pass'] (case insensitive)")
+        write!(f, "Unrecognized status. Acceptable test statuses are ['OFL', 'HI-Lmt', 'LO-Lmt', 'Ramp', 'Dwell', 'Abort', 'Pass'] (case sensitive)")
     }
 }
 
@@ -1257,13 +1421,24 @@ macro_rules! impl_test_editor
 
 macro_rules! impl_device
 {
+    (executor_type Sci No) => { super::SciSingleExecutor<T> };
+    (executor_type Sci Yes) => { super::SciMultiExecutor<T> };
+    (executor_type AssociatedResearch Yes) => { super::ArExecutor<T> };
+    (create_delegate Sci No $handle:expr) => { super::SciSingleExecutor::with($handle) };
+    (create_delegate Sci Yes $handle:expr) => { super::SciMultiExecutor::with($handle) };
+    (create_delegate AssociatedResearch Yes $handle:expr) => { super::ArExecutor::with($handle) };
     {edit_sequence Sci No} => {
+        /// Edit the test sequence on the device
         pub fn edit_sequence<'h>(&'h mut self) -> TestEditor<'h, T>
         {
             TestEditor::new(self, 1)
         }
     };
     {edit_sequence $brand:ident Yes} => {
+        /// Edit a test sequence on the device
+        ///
+        /// This will create a test builder object which can be used to specify the tests and then submit them to the
+        /// device.
         pub fn edit_sequence<'h>(&'h mut self, sequence_num: u32) -> TestEditor<'h, T>
         {
             TestEditor::new(self, sequence_num)
@@ -1298,14 +1473,14 @@ macro_rules! define_device
     } => {
         mod $dev {
             use super::{Amp, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
-                exec_all, StepInfo, TestParams, CmdSet
+                StepInfo, TestParams, CmdSet
             };
             use std::time::Duration;
             use tokio::io::{ AsyncReadExt, AsyncWriteExt };
 
             pub struct Device<T>
             {
-                io_handle: T,
+                io_handle: impl_device!(executor_type $brand $qualifier),
             }
 
             impl <T> Device<T>
@@ -1325,10 +1500,15 @@ macro_rules! define_device
             impl <T> Device<T>
                 where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
             {
+                /// Construct a new device handle from an async I/O stream
+                ///
+                /// Creating I/O handles is not handled by this library so that you are not restricted to connecting to
+                /// the device via a particular hardware interface. For instance, it may be desirable to use a TCP/IP
+                /// serial bridge so that the device can be controlled via the Internet instead of a local RS232 line.
                 pub fn with(io_handle: T) -> Self
                 {
                     Device {
-                        io_handle: io_handle,
+                        io_handle: impl_device!(create_delegate $brand $qualifier io_handle),
                     }
                 }
 
@@ -1345,6 +1525,21 @@ macro_rules! define_device
                 // {
                 //     self.io_handle.write_all("TD?".as_bytes()).await?;
                 //     let mut buf = 
+                // }
+
+                // pub async fn start_test(&mut self) -> Result<(), std::io::Error>
+                // {
+                    
+                // }
+            
+                // pub async fn soft_reset(&mut self) -> Result<(), std::io::Error>
+                // {
+                    
+                // }
+
+                // pub async fn get_test_data(&mut self, step_num: u32) -> Result<(), std::io::Error>
+                // {
+                    
                 // }
             }
 
@@ -1379,6 +1574,14 @@ macro_rules! define_device
                     }
                 }
 
+                /// Select the step to be edited
+                ///
+                /// Until a different step is selected, all changes will clobber each other on the current step. For
+                /// instance, if a ground bond test is specified and then subsequently an AC hipot test is specified,
+                /// only the AC hipot spec will be submitted to the device.
+                ///
+                /// The step number must be within limits of what this device allows. If it is not, a runtime error will
+                /// occur when the test regiment is compiled and submitted to the device.
                 pub fn step(mut self, step_num: u32) -> Self
                 {
                     self.editor.step(step_num);
@@ -1391,6 +1594,10 @@ macro_rules! define_device
                     self
                 }
 
+                /// Send the test specification to the device
+                ///
+                /// The selected tests and parameters will be overwritten on the device's memory at the requested
+                /// locations.
                 pub async fn commit(self) -> Result<(), std::io::Error>
                 {
                     // TODO create the actual error kinds for the various ways this can fail
@@ -1405,7 +1612,7 @@ macro_rules! define_device
                         )
                         .ok_or(std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
                     
-                    exec_all(&mut self.dev.io_handle, &cmds, impl_test_editor!(commit $brand $qualifier)).await
+                    self.dev.io_handle.exec_all(&cmds).await
                 }
 
                 $(impl_test_editor!{$test_type})+
