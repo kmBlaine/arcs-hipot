@@ -1289,6 +1289,16 @@ macro_rules! impl_device
             TestEditor::new(self, sequence_num)
         }
     };
+    {load_sequence No} => {
+        // intentionally left blank
+    };
+    {load_sequence Yes} => {
+        pub async fn load_sequence(&mut self, sequence_num: u32) -> Result<(), std::io::Error>
+        {
+            self.io_handle.exec_cmd(CmdSet::LoadSequence(sequence_num)).await?;
+            Ok(())
+        }
+    };
     {sequences No} => {
         pub fn sequences(&self) -> u32
         {
@@ -1359,6 +1369,8 @@ macro_rules! define_device
                 }
 
                 impl_device!{edit_sequence $brand $qualifier}
+
+                impl_device!{load_sequence $qualifier}
                 // pub fn edit_test<'h>(&'h mut self, file_num: u32) -> TestEditor<'h, T>
                 // {
                 //     TestEditor {
@@ -1388,6 +1400,12 @@ macro_rules! define_device
                 pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseTestDataErr>
                 {
                     self.io_handle.get_test_data(step_num).await
+                }
+
+                pub async fn select_step(&mut self, step_num: u32) -> Result<(), std::io::Error>
+                {
+                    self.io_handle.exec_cmd(CmdSet::SelectStep(step_num)).await?;
+                    Ok(())
                 }
             }
 
