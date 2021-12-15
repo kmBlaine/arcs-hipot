@@ -361,6 +361,7 @@ pub enum AcFrequency
     Hz60,
 }
 
+#[derive(Clone)]
 enum GndBondParam
 {
     Frequency(AcFrequency),
@@ -371,6 +372,7 @@ enum GndBondParam
     Offset(Ohm),
 }
 
+#[derive(Clone)]
 enum AcHipotParam
 {
     Frequency(AcFrequency),
@@ -381,6 +383,7 @@ enum AcHipotParam
     LeakageMin(Amp),
 }
 
+#[derive(Clone)]
 enum CmdSet
 {
     /// Ready a test file stored on the device for execution and editing
@@ -413,24 +416,6 @@ enum CmdSet
     SoftReset,
     /// Gets the test data for the given step
     GetTestData(u32),
-}
-
-impl CmdSet
-{
-    fn display_sci_multi<'a>(&'a self) -> SciMultiSeqDisplay<'a>
-    {
-        SciMultiSeqDisplay::new(self)
-    }
-
-    fn display_sci_single<'a>(&'a self) -> SciSingleSeqDisplay<'a>
-    {
-        SciSingleSeqDisplay::new(self)
-    }
-
-    fn display_ar<'a>(&'a self) -> AssociatedResearchDisplay<'a>
-    {
-        AssociatedResearchDisplay::new(self)
-    }
 }
 
 fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
@@ -477,76 +462,46 @@ fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
     }
 }
 
-struct SciMultiSeqDisplay<'a>
+struct SciMultiSeqDisplay
 {
-    cmd: &'a CmdSet,
+    cmd: CmdSet,
 }
 
-impl <'a> SciMultiSeqDisplay<'a>
-{
-    fn new(cmd: &'a CmdSet) -> Self
-    {
-        Self {
-            cmd: cmd
-        }
-    }
-}
-
-impl <'a> fmt::Display for SciMultiSeqDisplay<'a>
+impl fmt::Display for SciMultiSeqDisplay
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
         match self.cmd {
             CmdSet::LoadSequence(file_num) => write!(f, "FL {}", file_num),
             CmdSet::SelectStep(step_num) => write!(f, "SS {}", step_num),
-            _ => display_sci_core(self.cmd, f),
+            _ => display_sci_core(&self.cmd, f),
         }
     }
 }
 
-struct SciSingleSeqDisplay<'a>
+struct SciSingleSeqDisplay
 {
-    cmd: &'a CmdSet,
+    cmd: CmdSet,
 }
 
-impl <'a> SciSingleSeqDisplay<'a>
-{
-    fn new(cmd: &'a CmdSet) -> Self
-    {
-        Self {
-            cmd: cmd
-        }
-    }
-}
-
-impl <'a> fmt::Display for SciSingleSeqDisplay<'a>
+impl fmt::Display for SciSingleSeqDisplay
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
         match self.cmd {
             CmdSet::LoadSequence(file_num) => panic!("`LoadSequence` is not supported on SCI single-sequence devices"),
             CmdSet::SelectStep(step_num) => write!(f, "FL {}", step_num),
-            _ => display_sci_core(self.cmd, f),
+            _ => display_sci_core(&self.cmd, f),
         }
     }
 }
 
-struct AssociatedResearchDisplay<'a>
+struct AssociatedResearchDisplay
 {
-    cmd: &'a CmdSet,
+    cmd: CmdSet,
 }
 
-impl <'a> AssociatedResearchDisplay<'a>
-{
-    fn new(cmd: &'a CmdSet) -> Self
-    {
-        Self {
-            cmd: cmd
-        }
-    }
-}
-
-impl <'a> fmt::Display for AssociatedResearchDisplay<'a>
+impl fmt::Display for AssociatedResearchDisplay
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
@@ -555,8 +510,8 @@ impl <'a> fmt::Display for AssociatedResearchDisplay<'a>
             CmdSet::SelectStep(step_num) => write!(f, "S6 {}", step_num),
             CmdSet::SetAcHipot => write!(f, "FC"),
             CmdSet::SetGndBond => write!(f, "FF"),
-            CmdSet::ContinueToNext(cont) => if *cont { write!(f, "FQ") } else { write!(f, "FR") },
-            CmdSet::SetAcHipotParam(param) => match param {
+            CmdSet::ContinueToNext(cont) => if cont { write!(f, "FQ") } else { write!(f, "FR") },
+            CmdSet::SetAcHipotParam(ref param) => match param {
                 AcHipotParam::Frequency(frequency) => match frequency {
                     AcFrequency::Hz50 => write!(f, "FJ"),
                     AcFrequency::Hz60 => write!(f, "FI"),
@@ -567,7 +522,7 @@ impl <'a> fmt::Display for AssociatedResearchDisplay<'a>
                 AcHipotParam::LeakageMax(leak_current) => write!(f, "SB {}", leak_current.value.display_milli(1)),
                 AcHipotParam::LeakageMin(leak_current) => write!(f, "SC {}", leak_current.value.display_milli(1)),
             },
-            CmdSet::SetGndBondParam(param) => match param {
+            CmdSet::SetGndBondParam(ref param) => match param {
                 GndBondParam::Frequency(frequency) => match frequency {
                     AcFrequency::Hz50 => write!(f, "FP"),
                     AcFrequency::Hz60 => write!(f, "FO"),
@@ -585,15 +540,48 @@ impl <'a> fmt::Display for AssociatedResearchDisplay<'a>
     }
 }
 
-struct Executor<T>
+trait CmdDisplayFactory: fmt::Display
+{
+    fn display_cmd(cmd: CmdSet) -> Self;
+}
+
+impl CmdDisplayFactory for SciSingleSeqDisplay
+{
+    fn display_cmd(cmd: CmdSet) -> Self
+    {
+        Self { cmd: cmd }
+    }
+}
+
+impl CmdDisplayFactory for SciMultiSeqDisplay
+{
+    fn display_cmd(cmd: CmdSet) -> Self
+    {
+        Self { cmd: cmd }
+    }
+}
+
+impl CmdDisplayFactory for AssociatedResearchDisplay
+{
+    fn display_cmd(cmd: CmdSet) -> Self
+    {
+        Self { cmd: cmd }
+    }
+}
+
+struct Executor<T, D>
 {
     line_ending: &'static str,
     io_handle: T,
     read_buf: Vec<u8>,
+    // This marker exists so we can attach basically just a function using compiler generics which
+    // creates the display delegate for the commands. There is no actual data or state to store
+    _marker: std::marker::PhantomData<D>,
 }
 
-impl <T> Executor<T>
-    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send
+impl <T, D> Executor<T, D>
+    where T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+          D: CmdDisplayFactory
 {
     fn with(line_ending: &'static str, io_handle: T) -> Self
     {
@@ -601,6 +589,7 @@ impl <T> Executor<T>
             line_ending: line_ending,
             io_handle: io_handle,
             read_buf: Vec::with_capacity(128),
+            _marker: std::marker::PhantomData,
         }
     }
 
@@ -678,10 +667,10 @@ impl <T> Executor<T>
     /// depending on the nature if the command. If the command asks the device set up a test it does not
     /// support -- e.g. a ground bond when it is a hipot-only tester -- then an I/O error with the kind
     /// `Unsupported` is returned. In all other NAK cases, `InvalidData` is returned.
-    async fn exec_cmd<'a, D>(&mut self, cmd: &'a CmdSet, display_func: fn(&'a CmdSet) -> D) -> Result<usize, io::Error>
-        where D: fmt::Display,
+    async fn exec_cmd(&mut self, cmd: CmdSet) -> Result<usize, io::Error>
+        //where D: fmt::Display,
     {
-        let serialized = format!("{}{}", display_func(cmd), self.line_ending);
+        let serialized = format!("{}{}", D::display_cmd(cmd), self.line_ending);
         self.io_handle.write_all(serialized.as_bytes()).await?;
         let response_len = self.read_line().await?;
 
@@ -694,23 +683,56 @@ impl <T> Executor<T>
         }
     }
 
-    async fn exec_all<'a, D>(&mut self, cmds: &'a [CmdSet], display_func: fn(&'a CmdSet) -> D) -> Result<(), io::Error>
-        where D: fmt::Display
+    async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), io::Error>
     {
         for cmd in cmds.iter() {
-            let response_len = self.exec_cmd(cmd, display_func).await?;
+            let response_len = self.exec_cmd(cmd.clone()/*, display_func*/).await?;
             self.drop_first(response_len);
         }
 
         Ok(())
     }
 
-    // async fn 
+    fn get_string(&mut self, size: usize) -> Result<String, std::string::FromUtf8Error>
+    {
+        let mut response = Vec::with_capacity(size);
+        // These devices will reply with extended ASCII, specifically an omega 'Ω' for resistance values
+        // thus we need to do some simple substitutions to turn into proper UTF8
+        for byte in &self.read_buf[0..size] {
+            if *byte == 0xEAu8 {
+                let start_loc = response.len();
+                let omega = 'Ω';
+                response.resize(start_loc + omega.len_utf8(), 0);
+                omega.encode_utf8(&mut response[start_loc..]);
+            }
+            else {
+                response.push(*byte);
+            }
+        }
+        self.drop_first(size);
+
+        String::from_utf8(response)
+    }
+
+    async fn get_test_data<P>(
+        &mut self,
+        step_num: u32,
+    )
+        -> Result<P, test_data::ParseTestDataErr>
+
+        where P: std::str::FromStr<Err = test_data::ParseTestDataErr>,
+    {
+        let response_len = self.exec_cmd(CmdSet::GetTestData(step_num)/*, display_func*/).await?;
+        let response = self.get_string(response_len)?;
+        let data = response.parse::<P>()?;
+        
+        Ok(data)
+    }
 }
 
 struct SciSingleExecutor<T>
 {
-    delegate: Executor<T>,
+    delegate: Executor<T, SciSingleSeqDisplay>,
 }
 
 impl <T> SciSingleExecutor<T>
@@ -723,20 +745,26 @@ impl <T> SciSingleExecutor<T>
         }
     }
 
-    async fn exec_cmd(&mut self, cmd: &CmdSet) -> Result<usize, std::io::Error>
+    async fn exec_cmd(&mut self, cmd: CmdSet) -> Result<usize, std::io::Error>
     {
-        self.delegate.exec_cmd(cmd, CmdSet::display_sci_single).await
+        self.delegate.exec_cmd(cmd).await
     }
 
     async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), std::io::Error>
     {
-        self.delegate.exec_all(cmds, CmdSet::display_sci_single).await
+        self.delegate.exec_all(cmds).await
+    }
+
+    async fn get_test_data(&mut self, step_num: u32) -> Result<test_data::TestData, test_data::ParseTestDataErr>
+    {
+        let data = self.delegate.get_test_data::<test_data::SciTestData>(step_num).await?;
+        Ok(data.into())
     }
 }
 
 struct SciMultiExecutor<T>
 {
-    delegate: Executor<T>,
+    delegate: Executor<T, SciMultiSeqDisplay>,
 }
 
 impl <T> SciMultiExecutor<T>
@@ -749,20 +777,20 @@ impl <T> SciMultiExecutor<T>
         }
     }
 
-    async fn exec_cmd(&mut self, cmd: &CmdSet) -> Result<usize, std::io::Error>
+    async fn exec_cmd(&mut self, cmd: CmdSet) -> Result<usize, std::io::Error>
     {
-        self.delegate.exec_cmd(cmd, CmdSet::display_sci_multi).await
+        self.delegate.exec_cmd(cmd).await
     }
 
     async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), std::io::Error>
     {
-        self.delegate.exec_all(cmds, CmdSet::display_sci_multi).await
+        self.delegate.exec_all(cmds).await
     }
 }
 
 struct ArExecutor<T>
 {
-    delegate: Executor<T>,
+    delegate: Executor<T, AssociatedResearchDisplay>,
 }
 
 impl <T> ArExecutor<T>
@@ -775,14 +803,14 @@ impl <T> ArExecutor<T>
         }
     }
 
-    async fn exec_cmd(&mut self, cmd: &CmdSet) -> Result<usize, std::io::Error>
+    async fn exec_cmd(&mut self, cmd: CmdSet) -> Result<usize, std::io::Error>
     {
-        self.delegate.exec_cmd(cmd, CmdSet::display_ar).await
+        self.delegate.exec_cmd(cmd).await
     }
 
     async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), std::io::Error>
     {
-        self.delegate.exec_all(cmds, CmdSet::display_ar).await
+        self.delegate.exec_all(cmds).await
     }
 }
 
@@ -1303,13 +1331,13 @@ macro_rules! define_device
 
                 pub async fn start_test(&mut self) -> Result<(), std::io::Error>
                 {
-                    self.io_handle.exec_cmd(&CmdSet::RunTest).await?;
+                    self.io_handle.exec_cmd(CmdSet::RunTest).await?;
                     Ok(())
                 }
             
                 pub async fn soft_reset(&mut self) -> Result<(), std::io::Error>
                 {
-                    self.io_handle.exec_cmd(&CmdSet::SoftReset).await?;
+                    self.io_handle.exec_cmd(CmdSet::SoftReset).await?;
                     Ok(())
                 }
 

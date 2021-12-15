@@ -173,6 +173,17 @@ pub enum ParseTestDataErr
     InvalidInteger(std::num::ParseIntError),
     /// Invalid data encountered when attempting to parse the hipot leakage current
     InvalidDecimal(std::num::ParseFloatError),
+    /// The string returned by the device could not be interpreted as valid UTF8
+    ///
+    /// # Implementation Notes
+    /// These devices will reply with extended ASCII encoding. The library explicitly substitutes
+    /// extended ASCII bytes when reading the byte data from the device for an appropriate UTF8
+    /// character. At the time this library was written, the only known instance of the use of
+    /// extended ASCII however was the omega character for resistance values. Others may be lurking
+    /// unaccounted for.
+    InvalidUtf8(std::string::FromUtf8Error),
+    /// An I/O error occurred while attempting retrieve the test data
+    Io(std::io::Error),
 }
 
 impl From<ParseTestStatusErr> for ParseTestDataErr
@@ -207,6 +218,22 @@ impl From<ParseTestTypeErr> for ParseTestDataErr
     }
 }
 
+impl From<std::string::FromUtf8Error> for ParseTestDataErr
+{
+    fn from(parse_utf8_err: std::string::FromUtf8Error) -> Self
+    {
+        Self::InvalidUtf8(parse_utf8_err)
+    }
+}
+
+impl From<std::io::Error> for ParseTestDataErr
+{
+    fn from(io_err: std::io::Error) -> Self
+    {
+        Self::Io(io_err)
+    }
+}
+
 impl fmt::Display for ParseTestDataErr
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
@@ -218,6 +245,8 @@ impl fmt::Display for ParseTestDataErr
             Self::InvalidStatus(status_err) => write!(f, "{}", status_err),
             Self::InvalidInteger(num_err) => write!(f, "Failed to parse memory location or ground bond result: {}", num_err),
             Self::InvalidDecimal(num_err) => write!(f, "Failed to parse hipot leakage current: {}", num_err),
+            Self::InvalidUtf8(utf8_err) => write!(f, "The device replied with an unexpected character. Caused by {}", utf8_err),
+            Self::Io(io_err) => write!(f, "{}", io_err),
         }
     }
 }
