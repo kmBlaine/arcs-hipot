@@ -4,19 +4,19 @@ use arcs_hipot::test_data::{ TestData, AcHipotOutcome, GndBondOutcome };
 
 const DEVICE_NAME: &'static str = "/dev/ttyS0";
 
+static PORT_SETTINGS: tokio_serial::SerialPortSettings = tokio_serial::SerialPortSettings {
+    baud_rate: 9600,
+    parity: tokio_serial::Parity::None,
+    stop_bits: tokio_serial::StopBits::One,
+    data_bits: tokio_serial::DataBits::Eight,
+    flow_control: tokio_serial::FlowControl::None,
+    timeout: std::time::Duration::from_millis(10),
+};
+
 #[tokio::test]
 async fn create_ac_hipot_w_gnd_bond()
 {
-    let port_settings = tokio_serial::SerialPortSettings {
-        baud_rate: 9600,
-        parity: tokio_serial::Parity::None,
-        stop_bits: tokio_serial::StopBits::One,
-        data_bits: tokio_serial::DataBits::Eight,
-        flow_control: tokio_serial::FlowControl::None,
-        ..Default::default()
-    };
-
-    let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &port_settings).unwrap());
+    let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &PORT_SETTINGS).unwrap());
 
     assert!(device
         .edit_sequence(4)
@@ -48,13 +48,24 @@ async fn create_ac_hipot_w_gnd_bond()
         .await
         .is_ok()
     );
+}
+
+#[tokio::test]
+async fn load_and_run_test()
+{
+    let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &PORT_SETTINGS).unwrap());
 
     assert!(device.load_sequence(4).await.is_ok());
+    assert!(device.select_step(2).await.is_ok());
     assert!(device.start_test().await.is_ok());
+}
 
-    tokio::time::delay_for(tokio::time::Duration::from_secs(10)).await;
+#[tokio::test]
+async fn retrieve_results()
+{
+    let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &PORT_SETTINGS).unwrap());
 
-    let results = device.get_test_data(1).await;
+    let results = device.get_test_data(2).await;
     assert!(results.is_ok());
     let results = results.unwrap();
 
