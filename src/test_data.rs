@@ -19,7 +19,7 @@ pub enum AcHipotOutcome
 
 impl AcHipotOutcome
 {
-    fn passed(&self) -> bool
+    pub fn passed(&self) -> bool
     {
         match self {
             Self::Passed(_) => true,
@@ -41,6 +41,17 @@ pub enum GndBondOutcome
     ResistanceSubnormal(Ohm),
     Aborted,
     Passed(Ohm),
+}
+
+impl GndBondOutcome
+{
+    pub fn passed(&self) -> bool
+    {
+        match self {
+            Self::Passed(_) => true,
+            _ => false,
+        }
+    }
 }
 
 pub struct GndBondData
@@ -114,7 +125,7 @@ impl std::str::FromStr for SciTestStatus
     }
 }
 
-pub enum SciTestType
+pub(super) enum SciTestType
 {
     GndBond,
     AcHipot,
@@ -140,7 +151,7 @@ pub enum TestData
     GndBond(GndBondData),
 }
 
-pub struct SciTestData
+pub(super) struct SciTestData
 {
     data: TestData,
 }

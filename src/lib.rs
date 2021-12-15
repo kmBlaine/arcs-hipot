@@ -8,7 +8,9 @@ use std::{
     io,
 };
 
-mod test_data;
+pub mod test_data;
+
+use test_data::{ TestData, SciTestData, ParseTestDataErr };
 
 /// Decimal number with fractional billionths (10e-9)
 ///
@@ -489,7 +491,7 @@ impl fmt::Display for SciSingleSeqDisplay
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
         match self.cmd {
-            CmdSet::LoadSequence(file_num) => panic!("`LoadSequence` is not supported on SCI single-sequence devices"),
+            CmdSet::LoadSequence(_) => panic!("`LoadSequence` is not supported on SCI single-sequence devices"),
             CmdSet::SelectStep(step_num) => write!(f, "FL {}", step_num),
             _ => display_sci_core(&self.cmd, f),
         }
@@ -718,9 +720,9 @@ impl <T, D> Executor<T, D>
         &mut self,
         step_num: u32,
     )
-        -> Result<P, test_data::ParseTestDataErr>
+        -> Result<P, ParseTestDataErr>
 
-        where P: std::str::FromStr<Err = test_data::ParseTestDataErr>,
+        where P: std::str::FromStr<Err = ParseTestDataErr>,
     {
         let response_len = self.exec_cmd(CmdSet::GetTestData(step_num)/*, display_func*/).await?;
         let response = self.get_string(response_len)?;
@@ -755,9 +757,9 @@ impl <T> SciSingleExecutor<T>
         self.delegate.exec_all(cmds).await
     }
 
-    async fn get_test_data(&mut self, step_num: u32) -> Result<test_data::TestData, test_data::ParseTestDataErr>
+    async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseTestDataErr>
     {
-        let data = self.delegate.get_test_data::<test_data::SciTestData>(step_num).await?;
+        let data = self.delegate.get_test_data::<SciTestData>(step_num).await?;
         Ok(data.into())
     }
 }
@@ -786,6 +788,12 @@ impl <T> SciMultiExecutor<T>
     {
         self.delegate.exec_all(cmds).await
     }
+
+    async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseTestDataErr>
+    {
+        let data = self.delegate.get_test_data::<SciTestData>(step_num).await?;
+        Ok(data.into())
+    }
 }
 
 struct ArExecutor<T>
@@ -811,6 +819,11 @@ impl <T> ArExecutor<T>
     async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), std::io::Error>
     {
         self.delegate.exec_all(cmds).await
+    }
+
+    async fn get_test_data(&mut self, _step_num: u32) -> Result<TestData, ParseTestDataErr>
+    {
+        unimplemented!("Parsing of Associated Research device memory is not complete")
     }
 }
 
@@ -1277,6 +1290,7 @@ macro_rules! define_device
             use super::{Amp, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
                 StepInfo, TestParams, CmdSet
             };
+            use crate::test_data::{ TestData, ParseTestDataErr };
             use std::time::Duration;
             use tokio::io::{ AsyncReadExt, AsyncWriteExt };
 
@@ -1341,10 +1355,10 @@ macro_rules! define_device
                     Ok(())
                 }
 
-                // pub async fn get_test_data(&mut self, step_num: u32) -> Result<(), std::io::Error>
-                // {
-                    
-                // }
+                pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseTestDataErr>
+                {
+                    self.io_handle.get_test_data(step_num).await
+                }
             }
 
             impl <T> TestSupport for Device<T>
