@@ -481,6 +481,16 @@ impl fmt::Display for SciMultiSeqDisplay
     }
 }
 
+impl From<CmdSet> for SciMultiSeqDisplay
+{
+    fn from(cmd: CmdSet) -> Self
+    {
+        Self {
+            cmd: cmd
+        }
+    }
+}
+
 struct SciSingleSeqDisplay
 {
     cmd: CmdSet,
@@ -494,6 +504,16 @@ impl fmt::Display for SciSingleSeqDisplay
             CmdSet::LoadSequence(_) => panic!("`LoadSequence` is not supported on SCI single-sequence devices"),
             CmdSet::SelectStep(step_num) => write!(f, "FL {}", step_num),
             _ => display_sci_core(&self.cmd, f),
+        }
+    }
+}
+
+impl From<CmdSet> for SciSingleSeqDisplay
+{
+    fn from(cmd: CmdSet) -> Self
+    {
+        Self {
+            cmd: cmd
         }
     }
 }
@@ -538,6 +558,16 @@ impl fmt::Display for AssociatedResearchDisplay
             CmdSet::RunTest => write!(f, "FA"),
             CmdSet::SoftReset => write!(f, "FB"),
             CmdSet::GetTestData(step_num) => write!(f, "?{}", step_num),
+        }
+    }
+}
+
+impl From<CmdSet> for AssociatedResearchDisplay
+{
+    fn from(cmd: CmdSet) -> Self
+    {
+        Self {
+            cmd: cmd
         }
     }
 }
@@ -1541,43 +1571,10 @@ define_device!{
 pub use sci_4520::{ Device as Sci4520, TestEditor as Sci4520TestEditor };
 pub use sci_448::{ Device as Sci448, TestEditor as Sci448TestEditor };
 pub use ar_7704::{ Device as Ar7704, TestEditor as Ar7704TestEditor };
-/*
-device
-    .edit_test(1)
-    .step(1)
-    .gnd_bond(
-        GndBondTest::new()
-            .set_check_current(Amps::from_whole(25))
-            .set_dwell(Duration::from_secs(3))
-    )
-    .continue_to_next(true)
-    .step(2)
-    .ac_hipot(
-        AcHipotTest::new()
-            .set_voltage(Volt::from_whole(1250))
-            .set_ramp(Duration::from_millis(333))
-            .set_dwell(Duration::from_secs(2))
-    )
-    .continue_to_next(false)
-    .exec()
-    .await?;
-
-device
-    .load_test(1)
-    .step(1)
-    .run_test()
-    .exec()
-    .await?;
-
-device
-    .get_result()
-    .exec()
-    .await?;
-*/
 
 #[cfg(test)]
 mod tests {
-    use super::{ Amp, Ohm, Volt, CmdSet, AcFrequency, GndBondParam, AcHipotParam};
+    use super::{ Amp, Ohm, Volt, CmdSet, AcFrequency, GndBondParam, AcHipotParam, SciSingleSeqDisplay, SciMultiSeqDisplay };
     use std::time::Duration;
 
     #[test]
@@ -1661,46 +1658,46 @@ mod tests {
     #[test]
     fn serialize_sci_core()
     {
-        assert_eq!(&format!("{}", CmdSet::SetAcHipot.display_sci_single()), "SAA");
-        assert_eq!(&format!("{}", CmdSet::SetGndBond.display_sci_single()), "SAG");
-        assert_eq!(&format!("{}", CmdSet::ContinueToNext(true).display_sci_single()), "ECC 1");
-        assert_eq!(&format!("{}", CmdSet::ContinueToNext(false).display_sci_single()), "ECC 0");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipot)), "SAA");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBond)), "SAG");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::ContinueToNext(true))), "ECC 1");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::ContinueToNext(false))), "ECC 0");
 
-        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::CheckCurrent(Amp::from_whole(25))).display_sci_single()), "EC 25.0");
-        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::DwellTime(Duration::from_millis(2_345))).display_sci_single()), "EDW 2.3");
-        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz50)).display_sci_single()), "EF 0");
-        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz60)).display_sci_single()), "EF 1");
-        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::ResistanceMax(Ohm::from_millis(128))).display_sci_single()), "EH 128");
-        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::ResistanceMin(Ohm::from_millis(0))).display_sci_single()), "EL 0");
-        assert_eq!(&format!("{}", CmdSet::SetGndBondParam(GndBondParam::Offset(Ohm::from_millis(56))).display_sci_single()), "EO 56");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::CheckCurrent(Amp::from_whole(25))))), "EC 25.0");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::DwellTime(Duration::from_millis(2_345))))), "EDW 2.3");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz50)))), "EF 0");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz60)))), "EF 1");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::ResistanceMax(Ohm::from_millis(128))))), "EH 128");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::ResistanceMin(Ohm::from_millis(0))))), "EL 0");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::Offset(Ohm::from_millis(56))))), "EO 56");
 
-        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz50)).display_sci_single()), "EF 0");
-        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz60)).display_sci_single()), "EF 1");
-        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::LeakageMax(Amp::from_micros(67_800))).display_sci_single()), "EH 67.8");
-        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::LeakageMin(Amp::from_micros(0))).display_sci_single()), "EL 0.0");
-        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::RampTime(Duration::from_millis(4_321))).display_sci_single()), "ERU 4.3");
-        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::Voltage(Volt::from_whole(1250))).display_sci_single()), "EV 1.25");
-        assert_eq!(&format!("{}", CmdSet::SetAcHipotParam(AcHipotParam::DwellTime(Duration::from_millis(2_345))).display_sci_single()), "EDW 2.3");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz50)))), "EF 0");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz60)))), "EF 1");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::LeakageMax(Amp::from_micros(67_800))))), "EH 67.8");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::LeakageMin(Amp::from_micros(0))))), "EL 0.0");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::RampTime(Duration::from_millis(4_321))))), "ERU 4.3");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::Voltage(Volt::from_whole(1250))))), "EV 1.25");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::DwellTime(Duration::from_millis(2_345))))), "EDW 2.3");
     }
 
     #[test]
     fn serialize_sci_multi_seq()
     {
-        assert_eq!(&format!("{}", CmdSet::LoadSequence(3).display_sci_multi()), "FL 3");
-        assert_eq!(&format!("{}", CmdSet::SelectStep(1).display_sci_multi()), "SS 1");
+        assert_eq!(&format!("{}", SciMultiSeqDisplay::from(CmdSet::LoadSequence(3))), "FL 3");
+        assert_eq!(&format!("{}", SciMultiSeqDisplay::from(CmdSet::SelectStep(1))), "SS 1");
     }
 
     #[test]
     fn serialize_sci_single_seq()
     {
-        assert_eq!(&format!("{}", CmdSet::SelectStep(1).display_sci_single()), "FL 1");
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SelectStep(1))), "FL 1");
     }
 
     #[test]
     #[should_panic]
     fn sci_single_load_seq_panics()
     {
-        format!("{}", CmdSet::LoadSequence(1).display_sci_single());
+        format!("{}", SciSingleSeqDisplay::from(CmdSet::LoadSequence(1)));
     }
 
     #[test]
