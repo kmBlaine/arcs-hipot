@@ -3,10 +3,8 @@ use std::fmt;
 
 pub enum AcHipotOutcome
 {
-    /// A short circuit was detected
-    ///
-    /// This outcome occurs when the leakage current exceeded the metering range of the instrument.
-    ShortCircuit,
+    /// The leakage current exceeded the instrumet's metering range
+    LeakOverflow,
     /// The leakage current exceeded the maximum acceptable limit
     ///
     /// This implies that the current fell within metering range
@@ -65,6 +63,19 @@ impl fmt::Display for ParseTestStatusErr
 
 impl std::error::Error for ParseTestStatusErr {}
 
+#[derive(Debug)]
+pub struct ParseTestTypeErr {}
+
+impl fmt::Display for ParseTestTypeErr
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        write!(f, "Unrecognized test type. Acceptable test types are ['ACW', 'GND'] (case sensitive)")
+    }
+}
+
+impl std::error::Error for ParseTestTypeErr {}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SciTestStatus
 {
@@ -103,42 +114,68 @@ impl std::str::FromStr for SciTestStatus
     }
 }
 
-struct SciGndBondData
+pub enum SciTestType
 {
-    data: GndBondData
+    GndBond,
+    AcHipot,
 }
 
-impl From<SciGndBondData> for GndBondData
+impl std::str::FromStr for SciTestType
 {
-    fn from(this: SciGndBondData) -> Self
+    type Err = ParseTestTypeErr;
+
+    fn from_str(status_str: &str) -> Result<Self, Self::Err>
+    {
+        match status_str {
+            "ACW" => Ok(Self::AcHipot),
+            "GND" => Ok(Self::GndBond),
+            _ => Err(ParseTestTypeErr{})
+        }
+    }
+}
+
+pub enum TestData
+{
+    AcHipot(AcHipotData),
+    GndBond(GndBondData),
+}
+
+pub struct SciTestData
+{
+    data: TestData,
+}
+
+impl From<SciTestData> for TestData
+{
+    fn from(this: SciTestData) -> Self
     {
         this.data
     }
 }
 
 #[derive(Debug)]
-pub enum ParseGndBondDataErr
+pub enum ParseTestDataErr
 {
     /// The device did not send back a complete response
     ResponseTooShort,
-    /// The test type token was not "GND"
+    /// The test type token was not one of [`GND`, `ACW`]
+    InvalidTestType(ParseTestTypeErr),
+    /// The test status indicated the test was incomplete or was unexpected for the type of test.
     ///
-    /// This could mean the token is gibberish or that the result is for a test other than a ground
-    /// bond.
-    InvalidTestType,
-    /// The test status was not one of Pass, Abort, HiLimit, or LoLimit
-    ///
-    /// For example, if the test is incomplete due to being in the ramp or dwell phases, this error
-    /// will be returned.
+    /// Ground bond tests expect one of Pass, Abort, HiLimit, or LoLimit. AC hipot tests expect one
+    /// of Pass, Abort, HiLimit, LoLimit, or Overflow. Dwell or Ramp indicate that the test has not
+    /// yet finished.
     UnexpectedStatus(SciTestStatus),
     /// Invalid status token encountered when attempting to parse the test status from the string
     InvalidStatus(ParseTestStatusErr),
-    /// Invalid data encountered when attempting to parse the ground memory location or resistance
+    /// Invalid data encountered when attempting to parse the memory location or ground resistance
     /// value
-    InvalidData(std::num::ParseIntError),
+    InvalidInteger(std::num::ParseIntError),
+    /// Invalid data encountered when attempting to parse the hipot leakage current
+    InvalidDecimal(std::num::ParseFloatError),
 }
 
-impl From<ParseTestStatusErr> for ParseGndBondDataErr
+impl From<ParseTestStatusErr> for ParseTestDataErr
 {
     fn from(parse_status_err: ParseTestStatusErr) -> Self
     {
@@ -146,39 +183,58 @@ impl From<ParseTestStatusErr> for ParseGndBondDataErr
     }
 }
 
-impl From<std::num::ParseIntError> for ParseGndBondDataErr
+impl From<std::num::ParseIntError> for ParseTestDataErr
 {
     fn from(parse_num_err: std::num::ParseIntError) -> Self
     {
-        Self::InvalidData(parse_num_err)
+        Self::InvalidInteger(parse_num_err)
     }
 }
 
-impl fmt::Display for ParseGndBondDataErr
+impl From<std::num::ParseFloatError> for ParseTestDataErr
+{
+    fn from(parse_num_err: std::num::ParseFloatError) -> Self
+    {
+        Self::InvalidDecimal(parse_num_err)
+    }
+}
+
+impl From<ParseTestTypeErr> for ParseTestDataErr
+{
+    fn from(parse_type_err: ParseTestTypeErr) -> Self
+    {
+        Self::InvalidTestType(parse_type_err)
+    }
+}
+
+impl fmt::Display for ParseTestDataErr
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
         match self {
             Self::ResponseTooShort => write!(f, "Response too short. Not all expected data were contained"),
-            Self::InvalidTestType => write!(f, "Invalid test type token. Expected 'GND'"),
+            Self::InvalidTestType(test_type_err) => write!(f, "Invalid test type token. {}", test_type_err),
             Self::UnexpectedStatus(status) => write!(f, "Unexpected status: {:?}. The test may be in progress", status),
             Self::InvalidStatus(status_err) => write!(f, "{}", status_err),
-            Self::InvalidData(num_err) => write!(f, "Failed to parse memory location or result value: {}", num_err),
+            Self::InvalidInteger(num_err) => write!(f, "Failed to parse memory location or ground bond result: {}", num_err),
+            Self::InvalidDecimal(num_err) => write!(f, "Failed to parse hipot leakage current: {}", num_err),
         }
     }
 }
 
-impl std::error::Error for ParseGndBondDataErr {}
+impl std::error::Error for ParseTestDataErr {}
 
-impl std::str::FromStr for SciGndBondData
+impl std::str::FromStr for SciTestData
 {
-    type Err = ParseGndBondDataErr;
+    type Err = ParseTestDataErr;
 
     fn from_str(data_str: &str) -> Result<Self, Self::Err>
     {
         let mut sequence_num = None;
         let mut step_num = None;
         let mut test_status = None;
+        let mut test_type = None;
+        let mut hipot_leak = None;
         let mut gnd_resistance = None;
 
         for (index, token) in data_str.split(',').enumerate() {
@@ -189,60 +245,87 @@ impl std::str::FromStr for SciGndBondData
                 step_num = Some(token.parse::<u32>()?);
             }
             else if index == 2 {
-                if token != "GND" {
-                    return Err(ParseGndBondDataErr::InvalidTestType)
-                }
+                test_type = Some(token.parse::<SciTestType>()?);
             }
             else if index == 3 {
                 let status = token.parse::<SciTestStatus>()?;
                 test_status = match status {
-                    SciTestStatus::Ramp | SciTestStatus::Dwell | SciTestStatus::Overflow => 
-                        return Err(ParseGndBondDataErr::UnexpectedStatus(status)),
+                    SciTestStatus::Ramp | SciTestStatus::Dwell => 
+                        return Err(ParseTestDataErr::UnexpectedStatus(status)),
                     status @ _ => Some(status),
                 };
             }
-            // token at index 4 is just the dwell time which we won't parse for now
+            // token at index 4 is just the ground dwell time and hipot voltage which we won't parse for now
             else if index == 5 {
-                gnd_resistance = Some(Ohm::from_millis(token.parse::<u32>()?));
+                match test_type.as_ref().unwrap() {
+                    SciTestType::GndBond => match test_status.as_ref().unwrap() {
+                        SciTestStatus::Abort => (),
+                        _ => {
+                            gnd_resistance = Some(Ohm::from_millis(token.parse::<u32>()?))
+                        },
+                    },
+                    SciTestType::AcHipot => match test_status.as_ref().unwrap() {
+                        SciTestStatus::Abort | SciTestStatus::Overflow => (),
+                        _ => {
+                            let milliamps = token.parse::<f64>()?;
+                            hipot_leak = Some(Amp::from_parts(0, (milliamps * 1_000_000.0) as u32));
+                        }
+                    }
+                }
+                
             }
         }
 
-        if sequence_num.is_none() || step_num.is_none() || test_status.is_none() {
-            return Err(ParseGndBondDataErr::ResponseTooShort)
+        if sequence_num.is_none() || step_num.is_none() || test_status.is_none() || test_type.is_none() {
+            return Err(ParseTestDataErr::ResponseTooShort);
         }
 
-        if gnd_resistance.is_none() {
-            match test_status.as_ref().unwrap() {
-                SciTestStatus::Abort => (),
-                _ => return Err(ParseGndBondDataErr::ResponseTooShort),
-            }
-        }
+        let test_data = match test_type.unwrap() {
+            SciTestType::GndBond => {
+                if gnd_resistance.is_none() {
+                    match test_status.as_ref().unwrap() {
+                        SciTestStatus::Abort => (),
+                        _ => return Err(ParseTestDataErr::ResponseTooShort),
+                    }
+                }
+
+                TestData::GndBond(GndBondData {
+                    sequence_num: sequence_num.unwrap(),
+                    step_num: step_num.unwrap(),
+                    outcome: match test_status.unwrap() {
+                        SciTestStatus::HiLimit => GndBondOutcome::ResistanceExcessive(gnd_resistance.unwrap()),
+                        SciTestStatus::LoLimit => GndBondOutcome::ResistanceSubnormal(gnd_resistance.unwrap()),
+                        SciTestStatus::Abort => GndBondOutcome::Aborted,
+                        SciTestStatus::Pass => GndBondOutcome::Passed(gnd_resistance.unwrap()),
+                        status @ _ => return Err(ParseTestDataErr::UnexpectedStatus(status)),
+                    }
+                })
+            },
+            SciTestType::AcHipot => {
+                if hipot_leak.is_none() {
+                    match test_status.as_ref().unwrap() {
+                        SciTestStatus::Abort | SciTestStatus::Overflow => (),
+                        _ => return Err(ParseTestDataErr::ResponseTooShort),
+                    }
+                }
+
+                TestData::AcHipot(AcHipotData {
+                    sequence_num: sequence_num.unwrap(),
+                    step_num: step_num.unwrap(),
+                    outcome: match test_status.unwrap() {
+                        SciTestStatus::Overflow => AcHipotOutcome::LeakOverflow,
+                        SciTestStatus::HiLimit => AcHipotOutcome::LeakExcessive(hipot_leak.unwrap()),
+                        SciTestStatus::LoLimit => AcHipotOutcome::LeakSubnormal(hipot_leak.unwrap()),
+                        SciTestStatus::Abort => AcHipotOutcome::Aborted,
+                        SciTestStatus::Pass => AcHipotOutcome::Passed(hipot_leak.unwrap()),
+                        status @ _ => return Err(ParseTestDataErr::UnexpectedStatus(status)),
+                    }
+                })
+            },
+        };
 
         Ok(Self {
-            data: GndBondData {
-                sequence_num: sequence_num.unwrap(),
-                step_num: step_num.unwrap(),
-                outcome: match test_status.unwrap() {
-                    SciTestStatus::HiLimit => GndBondOutcome::ResistanceExcessive(gnd_resistance.unwrap()),
-                    SciTestStatus::LoLimit => GndBondOutcome::ResistanceSubnormal(gnd_resistance.unwrap()),
-                    SciTestStatus::Abort => GndBondOutcome::Aborted,
-                    SciTestStatus::Pass => GndBondOutcome::Passed(gnd_resistance.unwrap()),
-                    status @ _ => return Err(ParseGndBondDataErr::UnexpectedStatus(status)),
-                }
-            }
+            data: test_data
         })
-    }
-}
-
-pub struct SciAcHipotData
-{
-    data: AcHipotData
-}
-
-impl From<SciAcHipotData> for AcHipotData
-{
-    fn from(this: SciAcHipotData) -> Self
-    {
-        this.data
     }
 }
