@@ -1,4 +1,4 @@
-use super::{ Ampere, Volt, Ohm, Milli };
+use crate::units::{ Ampere, Volt, Ohm, Milli };
 use std::fmt;
 
 pub enum AcHipotOutcome
