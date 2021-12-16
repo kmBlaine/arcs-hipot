@@ -1,4 +1,4 @@
-use super::{ Amp, Volt, Ohm };
+use super::{ Ampere, Volt, Ohm, Milli };
 use std::fmt;
 
 pub enum AcHipotOutcome
@@ -8,13 +8,13 @@ pub enum AcHipotOutcome
     /// The leakage current exceeded the maximum acceptable limit
     ///
     /// This implies that the current fell within metering range
-    LeakExcessive(Amp),
+    LeakExcessive(Ampere),
     /// The leakage current fell below the minimum acceptable limit
-    LeakSubnormal(Amp),
+    LeakSubnormal(Ampere),
     /// Operator aborted the test on the instrument UI
     Aborted,
     /// The leakage current was within acceptable limits
-    Passed(Amp),
+    Passed(Ampere),
 }
 
 impl AcHipotOutcome
@@ -68,7 +68,7 @@ impl fmt::Display for ParseTestStatusErr
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
-        write!(f, "Unrecognized status. Acceptable test statuses are ['OFL', 'HI-Lmt', 'LO-Lmt', 'Ramp', 'Dwell', 'Abort', 'Pass'] (case sensitive)")
+        write!(f, "Unrecognized status. Acceptable test statuses are ['OFL', 'HI-Limit', 'LO-Limit', 'Ramp', 'Dwell', 'Abort', 'Pass'] (case sensitive)")
     }
 }
 
@@ -92,9 +92,9 @@ pub enum SciTestStatus
 {
     /// "OFL"
     Overflow,
-    /// "HI-Lmt"
+    /// "HI-Limit"
     HiLimit,
-    /// "LO-Lmt"
+    /// "LO-Limit"
     LoLimit,
     /// "Ramp"
     Ramp,
@@ -114,8 +114,8 @@ impl std::str::FromStr for SciTestStatus
     {
         match status_str {
             "OFL" => Ok(Self::Overflow),
-            "HI-Lmt" => Ok(Self::HiLimit),
-            "LO-Lmt" => Ok(Self::LoLimit),
+            "HI-Limit" => Ok(Self::HiLimit),
+            "LO-Limit" => Ok(Self::LoLimit),
             "Ramp" => Ok(Self::Ramp),
             "Dwell" => Ok(Self::Dwell),
             "Abort" => Ok(Self::Abort),
@@ -301,14 +301,14 @@ impl std::str::FromStr for SciTestData
                     SciTestType::GndBond => match test_status.as_ref().unwrap() {
                         SciTestStatus::Abort => (),
                         _ => {
-                            gnd_resistance = Some(Ohm::from_millis(token.parse::<u32>()?))
+                            gnd_resistance = Some(Ohm::from::<Milli>(token.parse::<u64>()?))
                         },
                     },
                     SciTestType::AcHipot => match test_status.as_ref().unwrap() {
                         SciTestStatus::Abort | SciTestStatus::Overflow => (),
                         _ => {
                             let milliamps = token.parse::<f64>()?;
-                            hipot_leak = Some(Amp::from_parts(0, (milliamps * 1_000_000.0) as u32));
+                            hipot_leak = Some(Ampere::from_f64::<Milli>(milliamps));
                         }
                     }
                 }

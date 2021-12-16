@@ -9,352 +9,11 @@ use std::{
 };
 
 pub mod test_data;
+#[macro_use]
+pub mod units;
 
 use test_data::{ TestData, SciTestData, ParseTestDataErr };
-
-/// Decimal number with fractional billionths (10e-9)
-///
-/// **Justification:**
-///
-/// While there are tons of scientific, rational number, arbitrary precision, fixed precision, and
-/// other numerics libraries for Rust, most of them are inappropriate or complete overkill for what
-/// I'm trying to do here. Basically, I need fine-grained control over parsing and formatting,
-/// type safety, lossless numbers with micro (10e-6) precision, and strictly real numbers.
-/// Uom is about the closest any library comes to this but it does all of it's arithmetic in base
-/// units, meaning if you select integers as the underlying storage, you don't get even close to
-/// the level of precision I need in many cases. And if you select floats, then you're not lossless
-/// nor strictly real anymore.
-#[derive(Debug, Clone, Copy)]
-struct DecimalNano
-{
-    whole: u32,
-    nanos: u32,
-}
-
-impl DecimalNano
-{
-    fn is_zero(&self) -> bool
-    {
-        self.whole == 0 && self.nanos == 0
-    }
-
-    fn pack_into_u64(&self) -> u64
-    {
-        ((self.whole as u64) << 32) | (self.nanos as u64)
-    }
-
-    pub fn from_parts(whole: u32, nanos: u32) -> Self
-    {
-        Self {
-            whole: whole + nanos / 1_000_000_000,
-            nanos: nanos % 1_000_000_000
-        }
-    }
-
-    pub fn from_micros(micros: u32) -> Self
-    {
-        Self::from_parts(micros / 1_000_000, (micros % 1_000_000) * 1000)
-    }
-
-    pub fn from_millis(millis: u32) -> Self
-    {
-        Self::from_parts(millis / 1000, (millis % 1000) * 1_000_000)
-    }
-
-    pub fn from_whole(whole: u32) -> Self
-    {
-        Self {
-            whole: whole,
-            nanos: 0,
-        }
-    }
-
-    pub fn as_f64(&self) -> f64
-    {
-        (self.whole as f64) + (self.nanos as f64 / 1_000_000_000f64)
-    }
-
-    /// Displays the value with a floating decimal point and certain level of precision
-    ///
-    /// The position of the decimal point is specified with a power of ten and the precision is
-    /// given by a number places after the decimal point to display. Truncates unused digits
-    fn display_scalar(&self, magnitude: i32, decimal_pts: u32) -> DecimalNanoDisplay
-    {
-        DecimalNanoDisplay {
-            whole: self.whole,
-            nanos: self.nanos,
-            power_10: magnitude,
-            decimal_pts: decimal_pts,
-        }
-    }
-
-    fn display(&self, decimal_pts: u32) -> DecimalNanoDisplay
-    {
-        self.display_scalar(0, decimal_pts)
-    }
-
-    fn display_milli(&self, decimal_pts: u32) -> DecimalNanoDisplay
-    {
-        self.display_scalar(-3, decimal_pts)
-    }
-
-    fn display_kilo(&self, decimal_pts: u32) -> DecimalNanoDisplay
-    {
-        self.display_scalar(3, decimal_pts)
-    }
-}
-
-impl Add for DecimalNano
-{
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self
-    {
-        Self::from_parts(
-            self.whole + rhs.whole + (self.nanos + rhs.nanos) / 1_000_000_000,
-            (self.nanos + rhs.nanos) % 1_000_000_000,
-        )
-    }
-}
-
-impl Sub for DecimalNano
-{
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self
-    {
-        let fraction = self.nanos as i32 - rhs.nanos as i32;
-
-        if fraction < 0 {
-            Self::from_parts(self.whole - rhs.whole - 1, (fraction + 1_000_000_000) as u32)
-        }
-        else {
-            Self::from_parts(self.whole - rhs.whole, fraction as u32)
-        }
-    }
-}
-
-impl PartialEq for DecimalNano
-{
-    fn eq(&self, rhs: &Self) -> bool
-    {
-        self.whole == rhs.whole && self.nanos == rhs.nanos
-    }
-}
-
-impl PartialOrd for DecimalNano
-{
-    fn partial_cmp(&self, rhs: &Self) -> Option<Ordering>
-    {
-        self.pack_into_u64().partial_cmp(&rhs.pack_into_u64())
-    }
-}
-
-impl Eq for DecimalNano {}
-impl Ord for DecimalNano
-{
-    fn cmp(&self, rhs: &Self) -> Ordering
-    {
-        self.partial_cmp(rhs).unwrap()
-    }
-}
-
-pub struct DecimalNanoDisplay
-{
-    whole: u32,
-    nanos: u32,
-    decimal_pts: u32,
-    power_10: i32,
-}
-
-impl fmt::Display for DecimalNanoDisplay
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
-        let decimal_index = (10 - self.power_10) as usize;
-        let mut divisor = 1_000_000_000;
-        // convert to binary coded decimal
-        // this can then be converted directly to a UTF8 string without checks
-        // avoids double allocation of a vector by building and then cloning
-        let mut bcd = [0u8; 20]; // 10 bytes for the whole, 9 for the nanos, 1 decimal point
-        let mut dividend = self.whole;
-
-        for index in 0..10 {
-            let value = (dividend / divisor) as u8 | 0x30;
-
-            if index >= decimal_index {
-                if index == decimal_index {
-                    bcd[index] = 0x2E;
-                }
-                bcd[index + 1] = value;
-            }
-            else {
-                bcd[index] = value;
-            }
-            
-            dividend = dividend % divisor;
-            divisor /= 10;
-        }
-
-        dividend = self.nanos;
-        divisor = 100_000_000;
-
-        for index in 10..19 {
-            let value = (dividend / divisor) as u8 | 0x30;
-
-            if index >= decimal_index {
-                if index == decimal_index {
-                    bcd[index] = 0x2E;
-                }
-                bcd[index + 1] = value;
-            }
-            else {
-                bcd[index] = value;
-            }
-
-            dividend = dividend % divisor;
-            divisor /= 10;
-        }
-
-        // default the start index to on before the decimal place
-        // we will find if there are any others in there later
-        let mut start_index = decimal_index - 1;
-        let final_index = if self.decimal_pts == 0 {
-            decimal_index
-        }
-        else {
-            decimal_index + 1 + self.decimal_pts as usize
-        };
-
-        // find the first nonzero item
-        for index in 0..decimal_index {
-            if bcd[index] > 0x30 {
-                start_index = index;
-                break;
-            }
-        }
-
-        // This should be safe since any number less than ten plus 0x30 is a valid UTF8/ASCII arabic numeral
-        // If the indices are negative or beyond the end of the array, then a panic will be triggered from attempting
-        // to slice out of bounds. No undefined behavior should be possible.
-        let value_as_string = unsafe { String::from_utf8_unchecked(bcd[start_index..final_index].to_vec()) };
-
-        write!(f, "{}", value_as_string)
-    }
-}
-
-macro_rules! unit
-{
-    ($u:ident) => {
-        #[derive(Debug, Clone, Copy)]
-        pub struct $u
-        {
-            value: DecimalNano,
-        }
-
-        impl $u
-        {
-            pub fn from_parts(whole: u32, nanos: u32) -> Self
-            {
-                Self { value: DecimalNano::from_parts(whole, nanos) }
-            }
-
-            pub fn from_micros(micros: u32) -> Self
-            {
-                Self { value: DecimalNano::from_micros(micros) }
-            }
-
-            pub fn from_millis(millis: u32) -> Self
-            {
-                Self { value: DecimalNano::from_millis(millis) }
-            }
-
-            pub fn from_whole(whole: u32) -> Self
-            {
-                Self { value: DecimalNano::from_whole(whole) }
-            }
-
-            pub fn as_f64(&self) -> f64
-            {
-                self.value.as_f64()
-            }
-
-            pub fn display_milli(&self, decimal_pts: u32) -> DecimalNanoDisplay
-            {
-                self.value.display_milli(decimal_pts)
-            }
-
-            pub fn display_kilo(&self, decimal_pts: u32) -> DecimalNanoDisplay
-            {
-                self.value.display_kilo(decimal_pts)
-            }
-
-            pub fn display(&self, decimal_pts: u32) -> DecimalNanoDisplay
-            {
-                self.value.display(decimal_pts)
-            }
-
-            pub fn whole(&self) -> u32
-            {
-                self.value.whole
-            }
-
-            pub fn fraction(&self) -> u32
-            {
-                self.value.nanos
-            }
-        }
-
-        impl Add for $u
-        {
-            type Output = $u;
-
-            fn add(self, rhs: Self) -> Self
-            {
-                Self { value: self.value + rhs.value }
-            }
-        }
-        
-        impl Sub for $u
-        {
-            type Output = $u;
-        
-            fn sub(self, rhs: Self) -> Self
-            {
-                Self { value: self.value - rhs.value }
-            }
-        }
-
-        impl PartialEq for $u
-        {
-            fn eq(&self, rhs: &Self) -> bool
-            {
-                self.value == rhs.value
-            }
-        }
-
-        impl PartialOrd for $u
-        {
-            fn partial_cmp(&self, rhs: &Self) -> Option<Ordering>
-            {
-                self.value.partial_cmp(&rhs.value)
-            }
-        }
-
-        impl Eq for $u {}
-        impl Ord for $u
-        {
-            fn cmp(&self, rhs: &Self) -> Ordering
-            {
-                self.partial_cmp(rhs).unwrap()
-            }
-        }
-    }
-}
-
-unit!(Amp);
-unit!(Volt);
-unit!(Ohm);
+use units::{ Ampere, Volt, Ohm, Second, Scalar, Milli, Micro, Base, Kilo };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AcFrequency
@@ -367,8 +26,8 @@ pub enum AcFrequency
 enum GndBondParam
 {
     Frequency(AcFrequency),
-    DwellTime(Duration),
-    CheckCurrent(Amp),
+    DwellTime(Second),
+    CheckCurrent(Ampere),
     ResistanceMax(Ohm),
     ResistanceMin(Ohm),
     Offset(Ohm),
@@ -378,11 +37,11 @@ enum GndBondParam
 enum AcHipotParam
 {
     Frequency(AcFrequency),
-    DwellTime(Duration),
-    RampTime(Duration),
+    DwellTime(Second),
+    RampTime(Second),
     Voltage(Volt),
-    LeakageMax(Amp),
-    LeakageMin(Amp),
+    LeakageMax(Ampere),
+    LeakageMin(Ampere),
 }
 
 #[derive(Clone)]
@@ -435,11 +94,11 @@ fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
                     AcFrequency::Hz60 => '1',
                 }
             ),
-            AcHipotParam::DwellTime(seconds) => write!(f, "EDW {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-            AcHipotParam::RampTime(seconds) => write!(f, "ERU {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-            AcHipotParam::Voltage(voltage) => write!(f, "EV {}", voltage.value.display_kilo(2)),
-            AcHipotParam::LeakageMax(leak_current) => write!(f, "EH {}", leak_current.value.display_milli(1)),
-            AcHipotParam::LeakageMin(leak_current) => write!(f, "EL {}", leak_current.value.display_milli(1)),
+            AcHipotParam::DwellTime(seconds) => write!(f, "EDW {:.1}", view_anon!(seconds)),
+            AcHipotParam::RampTime(seconds) => write!(f, "ERU {:.1}", view_anon!(seconds)),
+            AcHipotParam::Voltage(voltage) => write!(f, "EV {}", view_anon!(voltage, Kilo)),
+            AcHipotParam::LeakageMax(leak_current) => write!(f, "EH {:.1}", view_anon!(leak_current, Milli)),
+            AcHipotParam::LeakageMin(leak_current) => write!(f, "EL {:.1}", view_anon!(leak_current, Milli)),
         },
         CmdSet::SetGndBondParam(param) => match param {
             GndBondParam::Frequency(frequency) => write!(
@@ -450,11 +109,11 @@ fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
                     AcFrequency::Hz60 => '1',
                 }
             ),
-            GndBondParam::DwellTime(seconds) => write!(f, "EDW {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-            GndBondParam::CheckCurrent(check_current) => write!(f, "EC {}", check_current.display(1)),
-            GndBondParam::ResistanceMax(resistance) => write!(f, "EH {}", resistance.value.display_milli(0)),
-            GndBondParam::ResistanceMin(resistance) => write!(f, "EL {}", resistance.value.display_milli(0)),
-            GndBondParam::Offset(offset) => write!(f, "EO {}", offset.value.display_milli(0)),
+            GndBondParam::DwellTime(seconds) => write!(f, "EDW {:.1}", view_anon!(seconds)),
+            GndBondParam::CheckCurrent(check_current) => write!(f, "EC {}", view_anon!(check_current)),
+            GndBondParam::ResistanceMax(resistance) => write!(f, "EH {:.00}", view_anon!(resistance, Milli)),
+            GndBondParam::ResistanceMin(resistance) => write!(f, "EL {:.00}", view_anon!(resistance, Milli)),
+            GndBondParam::Offset(offset) => write!(f, "EO {:.00}", view_anon!(offset, Milli)),
         },
         CmdSet::RunTest => write!(f, "TEST"),
         CmdSet::SoftReset => write!(f, "RESET"),
@@ -538,22 +197,22 @@ impl fmt::Display for AssociatedResearchDisplay
                     AcFrequency::Hz50 => write!(f, "FJ"),
                     AcFrequency::Hz60 => write!(f, "FI"),
                 },
-                AcHipotParam::DwellTime(seconds) => write!(f, "SE {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-                AcHipotParam::RampTime(seconds) => write!(f, "SD {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-                AcHipotParam::Voltage(voltage) => write!(f, "SA {}", voltage.value.display_kilo(2)),
-                AcHipotParam::LeakageMax(leak_current) => write!(f, "SB {}", leak_current.value.display_milli(1)),
-                AcHipotParam::LeakageMin(leak_current) => write!(f, "SC {}", leak_current.value.display_milli(1)),
+                AcHipotParam::DwellTime(seconds) => write!(f, "SE {:.1}", view_anon!(seconds)),// seconds.display_anon()),
+                AcHipotParam::RampTime(seconds) => write!(f, "SD {:.1}", view_anon!(seconds)),
+                AcHipotParam::Voltage(voltage) => write!(f, "SA {}", view_anon!(voltage, Kilo)),
+                AcHipotParam::LeakageMax(leak_current) => write!(f, "SB {:.1}", view_anon!(leak_current, Milli)),
+                AcHipotParam::LeakageMin(leak_current) => write!(f, "SC {:.1}", view_anon!(leak_current, Milli)),
             },
             CmdSet::SetGndBondParam(ref param) => match param {
                 GndBondParam::Frequency(frequency) => match frequency {
                     AcFrequency::Hz50 => write!(f, "FP"),
                     AcFrequency::Hz60 => write!(f, "FO"),
                 },
-                GndBondParam::DwellTime(seconds) => write!(f, "S2 {}.{}", seconds.as_secs(), seconds.subsec_millis() / 100),
-                GndBondParam::CheckCurrent(check_current) => write!(f, "SY {}", check_current.display(1)),
-                GndBondParam::ResistanceMax(resistance) => write!(f, "S0 {}", resistance.value.display_milli(0)),
-                GndBondParam::ResistanceMin(resistance) => write!(f, "S1 {}", resistance.value.display_milli(0)),
-                GndBondParam::Offset(offset) => write!(f, "S4 {}", offset.value.display_milli(0)),
+                GndBondParam::DwellTime(seconds) => write!(f, "S2 {:.1}", view_anon!(seconds)),
+                GndBondParam::CheckCurrent(check_current) => write!(f, "SY {:.1}", view_anon!(check_current, Milli)),
+                GndBondParam::ResistanceMax(resistance) => write!(f, "S0 {:.00}", view_anon!(resistance, Milli)),
+                GndBondParam::ResistanceMin(resistance) => write!(f, "S1 {:.00}", view_anon!(resistance, Milli)),
+                GndBondParam::Offset(offset) => write!(f, "S4 {:.01}", view_anon!(offset, Milli)),
             },
             CmdSet::RunTest => write!(f, "FA"),
             CmdSet::SoftReset => write!(f, "FB"),
@@ -662,6 +321,10 @@ impl <T, D> Executor<T, D>
     /// how many bytes are in the line
     ///
     /// On Error all bytes buffered are destroyed
+    ///
+    /// # Cancel Safety
+    /// This function is cancel safe e.g. when used inside of a `tokio::select!`. This is because
+    /// this will never destroy contents of the read buffer -- only append.
     async fn read_line(&mut self) -> Result<usize, std::io::Error>
     {
         let mut total_bytes_read = 0;
@@ -682,7 +345,6 @@ impl <T, D> Executor<T, D>
                     end_index = self.find_line_ending(prior_end);
                 }
                 Err(err) => {
-                    self.read_buf.clear();
                     return Err(err);
                 }
             }
@@ -700,7 +362,6 @@ impl <T, D> Executor<T, D>
     /// support -- e.g. a ground bond when it is a hipot-only tester -- then an I/O error with the kind
     /// `Unsupported` is returned. In all other NAK cases, `InvalidData` is returned.
     async fn exec_cmd(&mut self, cmd: CmdSet) -> Result<usize, io::Error>
-        //where D: fmt::Display,
     {
         let serialized = format!("{}{}", D::display_cmd(cmd), self.line_ending);
         self.io_handle.write_all(serialized.as_bytes()).await?;
@@ -718,7 +379,7 @@ impl <T, D> Executor<T, D>
     async fn exec_all(&mut self, cmds: &[CmdSet]) -> Result<(), io::Error>
     {
         for cmd in cmds.iter() {
-            let response_len = self.exec_cmd(cmd.clone()/*, display_func*/).await?;
+            let response_len = self.exec_cmd(cmd.clone()).await?;
             self.drop_first(response_len);
         }
 
@@ -754,7 +415,7 @@ impl <T, D> Executor<T, D>
 
         where P: std::str::FromStr<Err = ParseTestDataErr>,
     {
-        let response_len = self.exec_cmd(CmdSet::GetTestData(step_num)/*, display_func*/).await?;
+        let response_len = self.exec_cmd(CmdSet::GetTestData(step_num)).await?;
         let response = self.get_string(response_len)?;
         let data = response.parse::<P>()?;
         
@@ -861,11 +522,11 @@ impl <T> ArExecutor<T>
 pub struct AcHipotTestSpec
 {
     voltage: Option<Volt>,
-    dwell: Option<Duration>,
-    leak_current_min: Option<Amp>,
-    leak_current_max: Option<Amp>,
+    dwell: Option<Second>,
+    leak_current_min: Option<Ampere>,
+    leak_current_max: Option<Ampere>,
     frequency: Option<AcFrequency>,
-    ramp: Option<Duration>,
+    ramp: Option<Second>,
 }
 
 impl AcHipotTestSpec
@@ -888,19 +549,19 @@ impl AcHipotTestSpec
         self
     }
 
-    pub fn dwell_time(mut self, seconds: Duration) -> Self
+    pub fn dwell_time(mut self, seconds: Second) -> Self
     {
         self.dwell = Some(seconds);
         self
     }
 
-    pub fn leak_current_min(mut self, amps: Amp) -> Self
+    pub fn leak_current_min(mut self, amps: Ampere) -> Self
     {
         self.leak_current_min = Some(amps);
         self
     }
 
-    pub fn leak_current_max(mut self, amps: Amp) -> Self
+    pub fn leak_current_max(mut self, amps: Ampere) -> Self
     {
         self.leak_current_max = Some(amps);
         self
@@ -912,7 +573,7 @@ impl AcHipotTestSpec
         self
     }
 
-    pub fn ramp_time(mut self, seconds: Duration) -> Self
+    pub fn ramp_time(mut self, seconds: Second) -> Self
     {
         self.ramp = Some(seconds);
         self
@@ -922,8 +583,8 @@ impl AcHipotTestSpec
 #[derive(Clone)]
 pub struct GndBondTestSpec
 {
-    check_current: Option<Amp>,
-    dwell: Option<Duration>,
+    check_current: Option<Ampere>,
+    dwell: Option<Second>,
     resistance_max: Option<Ohm>,
     resistance_min: Option<Ohm>,
     frequency: Option<AcFrequency>,
@@ -944,13 +605,13 @@ impl GndBondTestSpec
         }
     }
 
-    pub fn check_current(mut self, amps: Amp) -> Self
+    pub fn check_current(mut self, amps: Ampere) -> Self
     {
         self.check_current = Some(amps);
         self
     }
 
-    pub fn dwell_time(mut self, seconds: Duration) -> Self
+    pub fn dwell_time(mut self, seconds: Second) -> Self
     {
         self.dwell = Some(seconds);
         self
@@ -1204,20 +865,20 @@ pub struct AcHipotDeviceLimits
 {
     pub voltage_min: Volt,
     pub voltage_max: Volt,
-    pub dwell_max: Duration,
-    pub dwell_min: Duration,
-    pub leak_current_max: Amp,
-    pub leak_current_min: Amp,
-    pub ramp_max: Duration,
-    pub ramp_min: Duration,
+    pub dwell_max: Second,
+    pub dwell_min: Second,
+    pub leak_current_max: Ampere,
+    pub leak_current_min: Ampere,
+    pub ramp_max: Second,
+    pub ramp_min: Second,
 }
 
 pub struct GndBondDeviceLimits
 {
-    pub check_current_min: Amp,
-    pub check_current_max: Amp,
-    pub dwell_min: Duration,
-    pub dwell_max: Duration,
+    pub check_current_min: Ampere,
+    pub check_current_max: Ampere,
+    pub dwell_min: Second,
+    pub dwell_max: Second,
     pub offset_min: Ohm,
     pub offset_max: Ohm,
     pub resistance_min: Ohm,
@@ -1252,15 +913,6 @@ macro_rules! impl_test_editor
             self.editor.test_spec(&mut self.steps, TestParams::GndBond(gnd_bond_params));
             self
         }
-    };
-    (commit AssociatedResearch Yes) => {
-        CmdSet::display_ar
-    };
-    (commit Sci Yes) => {
-        CmdSet::display_sci_multi
-    };
-    (commit Sci No) => {
-        CmdSet::display_sci_single
     };
 }
 
@@ -1327,8 +979,8 @@ macro_rules! define_device
         supported_tests: [$($test_type:ident {limits: $limit_type:ident $lims:tt}),+]
     } => {
         mod $dev {
-            use super::{Amp, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
-                StepInfo, TestParams, CmdSet
+            use super::{Ampere, Volt, Ohm, TestSupport, AcHipotDeviceLimits, GndBondDeviceLimits, AcHipotTestSpec, GndBondTestSpec,
+                StepInfo, TestParams, CmdSet, Second, Milli, Kilo, Micro
             };
             use crate::test_data::{ TestData, ParseTestDataErr };
             use std::time::Duration;
@@ -1371,19 +1023,6 @@ macro_rules! define_device
                 impl_device!{edit_sequence $brand $qualifier}
 
                 impl_device!{load_sequence $qualifier}
-                // pub fn edit_test<'h>(&'h mut self, file_num: u32) -> TestEditor<'h, T>
-                // {
-                //     TestEditor {
-                //         dev: self,
-                //         editor: super::TestEditor::edit_file(file_num),
-                //     }
-                // }
-
-                // pub fn print_screen(&mut self) -> Result<String, std::io::Error>
-                // {
-                //     self.io_handle.write_all("TD?".as_bytes()).await?;
-                //     let mut buf = 
-                // }
 
                 pub async fn start_test(&mut self) -> Result<(), std::io::Error>
                 {
@@ -1495,26 +1134,26 @@ define_device!{
     supported_tests: [
         ac_hipot_test {
             limits: AcHipotDeviceLimits {
-                voltage_min: Volt::from_whole(1000),
-                voltage_max: Volt::from_whole(5000),
-                dwell_min: Duration::from_millis(500),
-                dwell_max: Duration::from_millis(999_900),
-                leak_current_min: Amp::from_whole(0),
-                leak_current_max: Amp::from_micros(99_990),
-                ramp_min: Duration::from_millis(100),
-                ramp_max: Duration::from_millis(999_900),
+                voltage_min: fval!(1000.0, Volt),
+                voltage_max: ival!(5, Kilo Volt),
+                dwell_min: ival!(500, Milli Second),
+                dwell_max: ival!(999, Second) + ival!(900, Milli Second),
+                leak_current_min: ival!(0, Ampere),
+                leak_current_max: ival!(99_900, Micro Ampere),
+                ramp_min: ival!(100, Milli Second),
+                ramp_max: ival!(999, Second) + ival!(900, Milli Second),
             }
         },
         gnd_bond_test {
             limits: GndBondDeviceLimits {
-                check_current_min: Amp::from_whole(3),
-                check_current_max: Amp::from_whole(30),
-                dwell_min: Duration::from_millis(500),
-                dwell_max: Duration::from_millis(999_900),
-                offset_min: Ohm::from_whole(0),
-                offset_max: Ohm::from_millis(100),
-                resistance_min: Ohm::from_millis(0),
-                resistance_max: Ohm::from_millis(510),
+                check_current_min: ival!(3, Ampere),
+                check_current_max: ival!(30, Ampere),
+                dwell_min: ival!(500, Milli Second),
+                dwell_max: ival!(999, Second) + ival!(900, Milli Second),
+                offset_min: ival!(0, Ohm),
+                offset_max: ival!(100, Milli Ohm),
+                resistance_min: ival!(0, Ohm),
+                resistance_max: ival!(510, Milli Ohm),
             }
         }
     ]
@@ -1528,26 +1167,26 @@ define_device!{
     supported_tests: [
         ac_hipot_test {
             limits: AcHipotDeviceLimits {
-                voltage_min: Volt::from_whole(1000),
-                voltage_max: Volt::from_whole(5000),
-                dwell_min: Duration::from_millis(500),
-                dwell_max: Duration::from_millis(999_900),
-                leak_current_min: Amp::from_whole(0),
-                leak_current_max: Amp::from_micros(99_990),
-                ramp_min: Duration::from_millis(100),
-                ramp_max: Duration::from_millis(999_900),
+                voltage_min: fval!(1000.0, Volt),
+                voltage_max: ival!(5, Kilo Volt),
+                dwell_min: ival!(500, Milli Second),
+                dwell_max: ival!(999, Second) + ival!(900, Milli Second),
+                leak_current_min: ival!(0, Ampere),
+                leak_current_max: ival!(99, Milli Ampere) + ival!(900, Micro Ampere),
+                ramp_min: ival!(100, Milli Second),
+                ramp_max: ival!(999, Second) + ival!(900, Milli Second),
             }
         },
         gnd_bond_test {
             limits: GndBondDeviceLimits {
-                check_current_min: Amp::from_whole(3),
-                check_current_max: Amp::from_whole(30),
-                dwell_min: Duration::from_millis(500),
-                dwell_max: Duration::from_millis(999_900),
-                offset_min: Ohm::from_whole(0),
-                offset_max: Ohm::from_millis(100),
-                resistance_min: Ohm::from_millis(0),
-                resistance_max: Ohm::from_millis(510),
+                check_current_min: ival!(3, Ampere),
+                check_current_max: ival!(30, Ampere),
+                dwell_min: ival!(500, Milli Second),
+                dwell_max: ival!(999, Second) + ival!(900, Milli Second),
+                offset_min: ival!(0, Ohm),
+                offset_max: ival!(100, Milli Ohm),
+                resistance_min: ival!(0, Ohm),
+                resistance_max: ival!(510, Milli Ohm),
             }
         }
     ]
@@ -1561,26 +1200,26 @@ define_device!{
     supported_tests: [
         ac_hipot_test {
             limits: AcHipotDeviceLimits {
-                voltage_min: Volt::from_whole(1000),
-                voltage_max: Volt::from_whole(5000),
-                dwell_min: Duration::from_millis(500),
-                dwell_max: Duration::from_millis(999_900),
-                leak_current_min: Amp::from_whole(0),
-                leak_current_max: Amp::from_micros(99_990),
-                ramp_min: Duration::from_millis(100),
-                ramp_max: Duration::from_millis(999_900),
+                voltage_min: fval!(1000.0, Volt),
+                voltage_max: ival!(5, Kilo Volt),
+                dwell_min: ival!(500, Milli Second),
+                dwell_max: ival!(999, Second) + ival!(900, Milli Second),
+                leak_current_min: ival!(0, Ampere),
+                leak_current_max: ival!(99, Milli Ampere) + ival!(900, Micro Ampere),
+                ramp_min: ival!(100, Milli Second),
+                ramp_max: ival!(999, Second) + ival!(900, Milli Second),
             }
         },
         gnd_bond_test {
             limits: GndBondDeviceLimits {
-                check_current_min: Amp::from_whole(3),
-                check_current_max: Amp::from_whole(30),
-                dwell_min: Duration::from_millis(500),
-                dwell_max: Duration::from_millis(999_900),
-                offset_min: Ohm::from_whole(0),
-                offset_max: Ohm::from_millis(100),
-                resistance_min: Ohm::from_millis(0),
-                resistance_max: Ohm::from_millis(510),
+                check_current_min: ival!(3, Ampere),
+                check_current_max: ival!(30, Ampere),
+                dwell_min: ival!(500, Milli Second),
+                dwell_max: ival!(999, Second) + ival!(900, Milli Second),
+                offset_min: ival!(0, Ohm),
+                offset_max: ival!(100, Milli Ohm),
+                resistance_min: ival!(0, Ohm),
+                resistance_max: ival!(510, Milli Ohm),
             }
         }
     ]
@@ -1592,86 +1231,8 @@ pub use ar_7704::{ Device as Ar7704, TestEditor as Ar7704TestEditor };
 
 #[cfg(test)]
 mod tests {
-    use super::{ Amp, Ohm, Volt, CmdSet, AcFrequency, GndBondParam, AcHipotParam, SciSingleSeqDisplay, SciMultiSeqDisplay };
+    use super::{ Ampere, Ohm, Volt, CmdSet, AcFrequency, GndBondParam, AcHipotParam, SciSingleSeqDisplay, SciMultiSeqDisplay };
     use std::time::Duration;
-
-    #[test]
-    fn display_amp_subscalar_normal()
-    {
-        assert_eq!(&format!("{}", Amp::from_micros(45_600).display_milli(1)), "45.6");
-    }
-
-    #[test]
-    fn display_amp_subscalar_subnormal()
-    {
-        assert_eq!(&format!("{}", Amp::from_parts(0, 000_012_300).display_milli(4)), "0.0123");
-    }
-
-    #[test]
-    fn display_amp_subscalar_zero_with_pt()
-    {
-        assert_eq!(&format!("{}", Amp::from_micros(0).display_milli(2)), "0.00");
-    }
-
-    #[test]
-    fn display_amp_subscalar_zero_no_pt()
-    {
-        assert_eq!(&format!("{}", Amp::from_micros(0).display_milli(0)), "0");
-    }
-
-    #[test]
-    fn display_amp_normal()
-    {
-        assert_eq!(&format!("{}", Amp::from_millis(45_600).display(1)), "45.6");
-    }
-
-    #[test]
-    fn display_amp_subnormal()
-    {
-        assert_eq!(&format!("{}", Amp::from_parts(0, 012_300_000).display(3)), "0.012");
-    }
-
-    #[test]
-    fn display_amp_zero_with_pt()
-    {
-        assert_eq!(&format!("{}", Amp::from_micros(0).display(2)), "0.00");
-    }
-
-    #[test]
-    fn display_amp_zero_no_pt()
-    {
-        assert_eq!(&format!("{}", Amp::from_micros(0).display(0)), "0");
-    }
-
-    #[test]
-    fn display_amp_superscalar_normal()
-    {
-        assert_eq!(&format!("{}", Amp::from_whole(7890).display_kilo(2)), "7.89");
-    }
-
-    #[test]
-    fn display_amp_superscalar_subnormal()
-    {
-        assert_eq!(&format!("{}", Amp::from_whole(123).display_kilo(3)), "0.123");
-    }
-
-    #[test]
-    fn display_amp_superscalar_zero_with_pt()
-    {
-        assert_eq!(&format!("{}", Amp::from_whole(0).display_kilo(2)), "0.00");
-    }
-
-    #[test]
-    fn display_amp_superscalar_zero_no_pt()
-    {
-        assert_eq!(&format!("{}", Amp::from_whole(0).display_kilo(0)), "0");
-    }
-
-    #[test]
-    fn decimal_normalizes()
-    {
-        assert_eq!(Amp::from_parts(0, 1_100_000_000), Amp::from_parts(1, 100_000_000));
-    }
 
     #[test]
     fn serialize_sci_core()
