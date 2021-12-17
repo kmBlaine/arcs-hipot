@@ -1,64 +1,153 @@
-//! Device command definition, parsing, and serialization
+//! Device command definition, parsing, and serialization.
+//!
+//! This module revolves around the `CmdSet` enumeration which is more or less a byte code version of
+//! the ASCII command set used by SCI devices. The enum exists for:
+//!   1. The ease of developers attempting to reason about what the device will be asked to do.
+//!
+//!   2. Offer a way for there to be multiple wire representations of the same high-level commmand.
+//!
+//!   3. Make it possible to create programmatically novel sequences, methods, behaviors, etc without
+//!      painstakingly arranging bare text commands which offer no compiler assistance whatsoever.
+//!
+//! The test editors in this library compile a sequences of these byte-coded commands and the other
+//! methods usually use it as a backend to assure consistent behavior.
+//!
+//! One of the most crucial differences in representation comes from the ambiguity of certain commands between
+//! generations of devices. Earlier SCI devices (e.g. the 4520) have a concept of both multiple
+//! test sequences and multiple steps within each sequence, while later devices like the 448 only
+//! have multiple steps. However, both of these commands support an ASCII command `FL <#>` to change
+//! which procedure in memory is active. On the early devices, this command changes the sequence and
+//! there is a separate command, `SS <#>`, changes the step in the sequence. On the later devices,
+//! there is the same `FL` command and it changes the step, but the `SS` command isn't recognized.
+//!
+//! Another crucial difference is that the semantics of a command sometimes change based on context.
+//! For example, the `EC <#>` command edits current values, but it is only applicable for ground
+//! bond and hipot tests; insulation resistance need not apply. Even here are are ambiguities. When
+//! issued with a hipot step active, the value issued to the device must be in milliamps (mA) while
+//! when it is issued with a ground bond step active the value must be in amps (A). This is because
+//! while being the same command, they refer to different things entirely. One is the high current
+//! used to ensure ground safety and one is the low current expected due to good ground isolation
+//! from the mains.
+//!
+//! The older Associated Research devices handle this better or worse (depending on how you look at
+//! it) by having separate commands for every parameter. A key example is that ground check current
+//! is a different command `SY` from AC hipot leak current max `SA` and minimum `SB`. But one thing
+//! it definitely means is that the simplest way to manage this from the byte code's perspective is
+//! that new variants of `CmdSet` should be as precise as possible in their meaning.
+//!
+//! # Notes for `fmt::Display` and serializer implementations
+//! Implementors should NOT encode a line ending into the command. This is handled separately by the
+//! protocol executor.
 
 use std::fmt;
 use crate::{
     units::{ Ampere, Ohm, Volt, Second, Milli, Kilo }
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// The AC frequency to be used in a test sequence
+///
+/// Some devices support both 50 and 60 Hz AC testing and can be configured on the fly to use one
+/// or the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcFrequency
 {
+    /// 50Hz AC
     Hz50,
+    /// 60Hz AC
     Hz60,
 }
 
-#[derive(Clone)]
+/// Parameters relating to ground bond tests
+///
+/// These are split off as a substructure to reduce the verbosity of the `CmdSet` variants and make
+/// it clear that these commands edit parameters strictly related to ground bond tests. Also
+/// although these options sometimes serialize to the same wire command as for hipot and insulation
+/// resistance tests, they often have different semantics.
+#[derive(Debug, Clone)]
 pub enum GndBondParam
 {
+    /// AC frequency to be used for the check current
     Frequency(AcFrequency),
+    /// Duration for which the check current will be active
     DwellTime(Second),
+    /// The magnitude of the check current
     CheckCurrent(Ampere),
+    /// Maximum allowable resistance of the ground connection
+    ///
+    /// Resistance values exceeding this shall fail the test
     ResistanceMax(Ohm),
+    /// Minimum allowable resistance of the ground connection
+    ///
+    /// Resistance values falling below this shall fail the test
     ResistanceMin(Ohm),
+    /// The baseline resistance of the wiring which interfaces the device to the unit under test
+    ///
+    /// This value is subtracted from the measured resistance value before evaluating pass-fail status.
     Offset(Ohm),
 }
 
-#[derive(Clone)]
+/// Parameters relating to AC hipot tests
+///
+/// These are split off as a substructure to reduce the verbosity of the `CmdSet` variants and make
+/// it clear that these commands edit parameters strictly related to AC hipot tests. Also
+/// although these options sometimes serialize to the same wire command as for ground bond and insulation
+/// resistance tests, they often have different semantics.
+#[derive(Debug, Clone)]
 pub enum AcHipotParam
 {
+    /// AC frequency to be used for the check voltage
     Frequency(AcFrequency),
+    /// Duration for which the unit under test will be subjected to high voltage
     DwellTime(Second),
+    /// Duration over which the check voltage will be ramped from 0 volts to the full check potential
     RampTime(Second),
+    /// The magnitude of the check voltage
     Voltage(Volt),
+    /// Maximum allowable leakage current from the mains
+    ///
+    /// Leak currents exceeding this value shall fail the test
     LeakageMax(Ampere),
+    /// Minimum allowable leakage current from the mains
+    ///
+    /// Leak currents falling below this value shall fail the test
     LeakageMin(Ampere),
 }
 
-#[derive(Clone)]
+/// Byte-coded command to be issued to the device
+///
+/// Refer to the module-level documentation for purpose and semantics of this enum.
+#[derive(Debug, Clone)]
 pub enum CmdSet
 {
-    /// Ready a test file stored on the device for execution and editing
+    /// Ready a test sequence stored on the device for execution and editing
     ///
-    /// Command: `FL <file_number>`
+    /// Only applicable to devices which support multiple sequences.
     LoadSequence(u32),
-    /// Select a step in the currently loaded file
+    /// Select a step in the currently loaded sequence
     ///
-    /// Command: `SS <step_number>`
+    /// Applicable to all devices though serialization may differ.
     SelectStep(u32),
-    /// Change currently selected step to an AC hipot test with default parameters
+    /// Change currently selected step to an AC hipot test
     ///
-    /// Command: `SAA`
+    /// Whether this command recalls stored parameters or resets the step to default parameters is
+    /// device-dependent.
     SetAcHipot,
-    /// Change currently selected step to a ground bond test with default parameters
+    /// Change currently selected step to a ground bond test
     ///
-    /// Command: `SAG`
+    /// Whether this command recalls stored parameters or resets the step to default parameters is
+    /// device-dependent.
     SetGndBond,
-    /// When running the test, changes whether tester halts upon the completion of the current step
-    /// or continues to the next.
+    /// Changes whether tester halts upon the completion of the current step or continues to the next
     ///
-    /// Command: `ECC <1|0>`
+    /// `true` for continue on step completion. `false` for halting behavior
     ContinueToNext(bool),
+    /// Set parameter for an AC hipot test
+    ///
+    /// See the `AcHipotParam` enum for more details
     SetAcHipotParam(AcHipotParam),
+    /// Set parameter for a ground bond test
+    ///
+    /// See the `GndBondParam` enum for more details
     SetGndBondParam(GndBondParam),
     /// Run the currently loaded test starting at the currently selected step
     RunTest,
@@ -69,6 +158,13 @@ pub enum CmdSet
     GetTestData(u32),
 }
 
+/// Formatter/serializer for the core SCI command set
+///
+/// The `LoadSequence` and `SelectStep` variants of `CmdSet` are not stable across devices so they
+/// need different display implementations.
+///
+/// # Panics
+/// Panics if given a `LoadSequence` or `SelectStep` step
 fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
 {
     match cmd {
@@ -113,6 +209,10 @@ fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
     }
 }
 
+/// Display implementor for an SCI device which supports multiple test sequences
+///
+/// This wraps a `CmdSet` and provides a way of converting it to an ASCII string for sending over the 
+/// wire.
 pub struct SciMultiSeqDisplay
 {
     cmd: CmdSet,
@@ -140,6 +240,13 @@ impl From<CmdSet> for SciMultiSeqDisplay
     }
 }
 
+/// Display implementor for an SCI device which does not support multiple test sequences
+///
+/// This wraps a `CmdSet` and provides a way of converting it to an ASCII string for sending over the 
+/// wire.
+///
+/// # Panics
+/// Attempting to display a `LoadSequence` command will cause a panic
 pub struct SciSingleSeqDisplay
 {
     cmd: CmdSet,
@@ -167,6 +274,15 @@ impl From<CmdSet> for SciSingleSeqDisplay
     }
 }
 
+/// Display implementor for an Associated Research device
+///
+/// This wraps a `CmdSet` and provides a way of converting it to an ASCII string for sending over the 
+/// wire.
+///
+/// # Notes on implementation
+/// At the time this library was written, it is unknown if there are any AssociatedResearch devices
+/// which do not support multiple test sequences. Hence all are assumed to follow the model of the
+/// 7704
 pub struct AssociatedResearchDisplay
 {
     cmd: CmdSet,
@@ -221,6 +337,12 @@ impl From<CmdSet> for AssociatedResearchDisplay
     }
 }
 
+/// Provides a constructor method on a type for creating a string serializer for a `CmdSet`
+///
+/// This trait is intended as a zero-cost abstraction. Rather than enumerate the possible serizalizers
+/// and match at runtime, this allows the `CmdSet` serialization backends to be defined using a generic.
+/// That way the correct serialization function is determined at compile and keeps allocations
+/// and decision logic at runtime minimized.
 pub trait CmdDisplayFactory: fmt::Display
 {
     fn display_cmd(cmd: CmdSet) -> Self;
