@@ -105,7 +105,7 @@ macro_rules! define_device
                     TestParams, AcHipotTestSpec, GndBondTestSpec
                 },
                 test_data::{ TestData, ParseTestDataErr },
-                units::{ Ampere, Volt, Ohm, Second, Milli, Kilo, Micro }
+                units::{ Ampere, Volt, Ohm, Second, scalar::{ Milli, Kilo, Micro }}
             };
             use tokio::io::{ AsyncWriteExt, AsyncReadExt };
 

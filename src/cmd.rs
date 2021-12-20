@@ -41,7 +41,7 @@
 
 use std::fmt;
 use crate::{
-    units::{ Ampere, Ohm, Volt, Second, Milli, Kilo }
+    units::{ Ampere, Ohm, Volt, Second, scalar::{ Milli, Kilo } }
 };
 
 /// The AC frequency to be used in a test sequence
