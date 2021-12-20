@@ -5,6 +5,8 @@ pub mod test_data;
 pub mod units;
 pub mod devices;
 
+pub use devices::{ ArHypotMax7704, Sci4520, Sci448 };
+
 mod cmd;
 mod executor;
 mod test_edit;
