@@ -196,7 +196,7 @@ fn display_sci_core(cmd: &CmdSet, f: &mut fmt::Formatter<'_>) -> fmt::Result
                 }
             ),
             GndBondParam::DwellTime(seconds) => write!(f, "EDW {:.1}", view_anon!(seconds)),
-            GndBondParam::CheckCurrent(check_current) => write!(f, "EC {}", view_anon!(check_current)),
+            GndBondParam::CheckCurrent(check_current) => write!(f, "EC {:.1}", view_anon!(check_current)),
             GndBondParam::ResistanceMax(resistance) => write!(f, "EH {:.00}", view_anon!(resistance, Milli)),
             GndBondParam::ResistanceMin(resistance) => write!(f, "EL {:.00}", view_anon!(resistance, Milli)),
             GndBondParam::Offset(offset) => write!(f, "EO {:.00}", view_anon!(offset, Milli)),
@@ -369,5 +369,114 @@ impl CmdDisplayFactory for AssociatedResearchDisplay
     fn display_cmd(cmd: CmdSet) -> Self
     {
         Self { cmd: cmd }
+    }
+}
+
+#[cfg(test)]
+mod tests
+{
+    use crate::{
+        cmd::{ SciSingleSeqDisplay, SciMultiSeqDisplay, CmdSet, AcHipotParam, GndBondParam, AcFrequency },
+        units::*,
+        units::scalar::{ Milli, Micro, Kilo },
+    };
+
+    #[test]
+    fn serialize_sci_core()
+    {
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipot).to_string(),
+            "SAA"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBond).to_string(),
+            "SAG"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::ContinueToNext(true)).to_string(),
+            "ECC 1"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::ContinueToNext(false)).to_string(),
+            "ECC 0"
+        );
+
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::CheckCurrent(Ampere::from_base(25)))).to_string(),
+            "EC 25.0"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::DwellTime(Second::from::<Milli>(2_345)))).to_string(),
+            "EDW 2.3"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz50))).to_string(),
+            "EF 0"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::Frequency(AcFrequency::Hz60))).to_string(),
+            "EF 1"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::ResistanceMax(Ohm::from::<Milli>(128)))).to_string(),
+            "EH 128"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::ResistanceMin(Ohm::from_base(0)))).to_string(),
+            "EL 0"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetGndBondParam(GndBondParam::Offset(Ohm::from::<Milli>(56)))).to_string(),
+            "EO 56"
+        );
+
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz50))).to_string(),
+            "EF 0"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::Frequency(AcFrequency::Hz60))).to_string(),
+            "EF 1"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::LeakageMax(Ampere::from::<Micro>(67_800)))).to_string(),
+            "EH 67.8"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::LeakageMin(Ampere::from_base(0)))).to_string(),
+            "EL 0.0"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::RampTime(Second::from::<Milli>(4_321)))).to_string(),
+            "ERU 4.3"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::Voltage(Volt::from_base(1250)))).to_string(),
+            "EV 1.25"
+        );
+        assert_eq!(
+            &SciSingleSeqDisplay::from(CmdSet::SetAcHipotParam(AcHipotParam::DwellTime(Second::from::<Milli>(2_345)))).to_string(),
+            "EDW 2.3"
+        );
+    }
+
+    #[test]
+    fn serialize_sci_multi_seq()
+    {
+        assert_eq!(&format!("{}", SciMultiSeqDisplay::from(CmdSet::LoadSequence(3))), "FL 3");
+        assert_eq!(&format!("{}", SciMultiSeqDisplay::from(CmdSet::SelectStep(1))), "SS 1");
+    }
+
+    #[test]
+    fn serialize_sci_single_seq()
+    {
+        assert_eq!(&format!("{}", SciSingleSeqDisplay::from(CmdSet::SelectStep(1))), "FL 1");
+    }
+
+    #[test]
+    #[should_panic]
+    fn sci_single_load_seq_panics()
+    {
+        format!("{}", SciSingleSeqDisplay::from(CmdSet::LoadSequence(1)));
     }
 }
