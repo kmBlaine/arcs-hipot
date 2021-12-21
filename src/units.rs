@@ -689,51 +689,45 @@ macro_rules! view_anon
     };
 }
 
-// #[cfg(test)]
-// mod tests
-// {
-//     use super::{ BcdNano, Prefixed, Ampere, Milli };
-//     #[test]
-//     fn precision_truncates()
-//     {
-//         let prefixed = Prefixed {
-//             magnitude: 0,
-//             notation: "",
-//             value: BcdNano { nanos: 12345 * 1_000_000 },
-//         };
+#[cfg(test)]
+mod tests
+{
+    use super::{
+        Ampere,
+        scalar::{ Milli, Micro, Base },
+    };
+    #[test]
+    fn precision_truncates()
+    {
+        let val = Ampere::from::<Micro>(12_340);
+        assert_eq!(&format!("{:.2}", val.display_anon::<Milli>()), "12.34");
+    }
 
-//         assert_eq!(&format!("{:.2}", prefixed), "12.34");
-//     }
+    #[test]
+    fn precision_zero_extends()
+    {
+        let val = Ampere::from::<Micro>(123_450);
+        assert_eq!(&format!("{:.5}", val.display_anon::<Milli>()), "123.45000");
+    }
 
-//     #[test]
-//     fn precision_zero_extends()
-//     {
-//         let prefixed = Prefixed {
-//             magnitude: -1,
-//             notation: "",
-//             value: BcdNano { nanos: 12345 * 1_000_000 },
-//         };
+    #[test]
+    fn precision_forces_decimal()
+    {
+        let val = Ampere::from_base(12);
+        assert_eq!(&format!("{:.1}", val.display_anon::<Base>()), "12.0");
+    }
 
-//         assert_eq!(&format!("{:.5}", prefixed), "123.45000");
-//     }
+    #[test]
+    fn no_precision_prints_all()
+    {
+        let val = Ampere::from_parts::<Base>(12, 345_678_000);
+        assert_eq!(&format!("{}", val.display_anon_base()), "12.345678");
+    }
 
-//     #[test]
-//     fn no_precision_prints_all()
-//     {
-//         let prefixed = Prefixed {
-//             magnitude: -2,
-//             notation: "",
-//             value: BcdNano { nanos: 12_345_678_000 },
-//         };
-
-//         assert_eq!(&format!("{}", prefixed), "1234.5678");
-//     }
-
-//     #[test]
-//     fn format_unit()
-//     {
-//         let amp = val!(12345.678, Milli Ampere);
-//         // let amp = Ampere { value: BcdNano { nanos: 12_345_678_000 } };
-//         assert_eq!(&format!("{}", amp.display::<Milli>()), "12345.678mA");
-//     }
-// }
+    #[test]
+    fn format_unit()
+    {
+        let amp = ival!(12_345_678, Micro Ampere);
+        assert_eq!(&format!("{}", amp.display::<Milli>()), "12345.678mA");
+    }
+}
