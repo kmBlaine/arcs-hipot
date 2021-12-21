@@ -48,6 +48,17 @@
 //!   - SCI 4520
 //!   - SCI 448
 //!   - Associated Research HypotMax 7704
+//!
+//! ## What if my device isn't supported?
+//! You may be able to use a handle for a device already defined. The device handles mostly function
+//! to assure you don't ask for something impossible such as:
+//!   - A hipot test on a ground-bond-only device (this won't even compile)
+//!   - A max acceptable hipot leakage of 50mA on a 20mA device (this will result in a runtime error
+//!     and no command(s) sent to the device)
+//!
+//! Ultimately though, all these APIs map to basically the same ASCII commands on the serial line.
+//! Thus it is highly likely you could instantiate a handle for a device very similar to yours and
+//! use that instead.
 
 use crate::{
     executor::{ ArExecutor, SciMultiExecutor, SciSingleExecutor },
