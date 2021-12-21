@@ -1,6 +1,11 @@
-
-use arcs_hipot::{ Sci4520, AcHipotTestSpec, GndBondTestSpec, Amp, Ohm, Volt, AcFrequency };
-use arcs_hipot::test_data::{ TestData, AcHipotOutcome, GndBondOutcome };
+#[cfg(test)]
+mod sci_4520
+{
+use arcs_hipot::prelude::*;
+use arcs_hipot::{
+    ival, view,
+    devices::Sci4520,
+};
 
 const DEVICE_NAME: &'static str = "/dev/ttyS0";
 
@@ -14,7 +19,7 @@ static PORT_SETTINGS: tokio_serial::SerialPortSettings = tokio_serial::SerialPor
 };
 
 #[tokio::test]
-async fn create_ac_hipot_w_gnd_bond()
+async fn create_gnd_bond_w_ac_hipot()
 {
     let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &PORT_SETTINGS).unwrap());
 
@@ -22,26 +27,19 @@ async fn create_ac_hipot_w_gnd_bond()
         .edit_sequence(4)
         .step(1)
         .continue_to_next(true)
-        .ac_hipot(AcHipotTestSpec::new()
-            .voltage(Volt::from_whole(1250))
-            .leak_current_min(Amp::from_micros(800))
-            .leak_current_max(Amp::from_micros(25_400))
-            .ac_frequency(AcFrequency::Hz60)
-            .dwell_time(std::time::Duration::from_millis(3000))
-            .ramp_time(std::time::Duration::from_millis(900))
-        )
-        .commit()
-        .await
-        .is_ok()
-    );
-    
-    assert!(device
-        .edit_sequence(4)
-        .step(2)
         .gnd_bond(GndBondTestSpec::new()
-            .check_current(Amp::from_whole(25))
-            .resistance_max(Ohm::from_millis(150))
-            .dwell_time(std::time::Duration::from_secs(2))
+            .check_current(Ampere::from::<Base>(25))
+            .resistance_max(Ohm::from::<Milli>(150))
+            .dwell_time(Second::from_f64::<Base>(2.0))
+        )
+        .step(2)
+        .ac_hipot(AcHipotTestSpec::new()
+            .voltage(ival!(1250, Volt))
+            .leak_current_min(ival!(800, Micro Ampere))
+            .leak_current_max(ival!(15, Milli Ampere))
+            .ac_frequency(AcFrequency::Hz60)
+            .dwell_time(ival!(3, Second))
+            .ramp_time(ival!(900, Milli Second))
         )
         .continue_to_next(false)
         .commit()
@@ -56,7 +54,14 @@ async fn load_and_run_test()
     let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &PORT_SETTINGS).unwrap());
 
     assert!(device.load_sequence(4).await.is_ok());
-    assert!(device.select_step(2).await.is_ok());
+    assert!(device.select_step(1).await.is_ok());
+
+    // It was observed during integration testing that this device needs a little time after it loads
+    // a sequence before it will successfully run a test
+    //
+    // It will positively acknowledge that it started the test, but it doesn't actually do it
+    tokio::time::delay_for(tokio::time::Duration::from_millis(500)).await;
+
     assert!(device.start_test().await.is_ok());
 }
 
@@ -65,7 +70,7 @@ async fn retrieve_results()
 {
     let mut device = Sci4520::with(tokio_serial::Serial::from_path(DEVICE_NAME, &PORT_SETTINGS).unwrap());
 
-    let results = device.get_test_data(2).await;
+    let results = device.get_test_data(1).await;
     assert!(results.is_ok());
     let results = results.unwrap();
 
@@ -76,10 +81,10 @@ async fn retrieve_results()
                 data.sequence_num,
                 data.step_num,
                 match data.outcome {
-                    GndBondOutcome::ResistanceExcessive(ohms) => format!("Ground resistance exceeded allowable ({})", ohms.display_milli(0)),
-                    GndBondOutcome::ResistanceSubnormal(ohms) => format!("Ground resistance below allowable ({})", ohms.display_milli(0)),
+                    GndBondOutcome::ResistanceExcessive(ohms) => format!("Ground resistance exceeded allowable ({})", ohms.display::<Milli>()),
+                    GndBondOutcome::ResistanceSubnormal(ohms) => format!("Ground resistance below allowable ({})", ohms.display::<Milli>()),
                     GndBondOutcome::Aborted => format!("Ground bond test aborted"),
-                    GndBondOutcome::Passed(ohms) => format!("Ground bond passed ({})", ohms.display_milli(0)),
+                    GndBondOutcome::Passed(ohms) => format!("Ground bond passed ({})", ohms.display::<Milli>()),
                 }
             );
         },
@@ -90,12 +95,13 @@ async fn retrieve_results()
                 data.step_num,
                 match data.outcome {
                     AcHipotOutcome::LeakOverflow => format!("AC leakage too large to be measured. Is there a short circuit?"),
-                    AcHipotOutcome::LeakExcessive(amps) => format!("AC leakage exceeded allowable ({})", amps.display_milli(1)),
-                    AcHipotOutcome::LeakSubnormal(amps) => format!("AC leakage below allowable ({})", amps.display_milli(1)),
+                    AcHipotOutcome::LeakExcessive(amps) => format!("AC leakage exceeded allowable ({})", view!(amps, Milli)),
+                    AcHipotOutcome::LeakSubnormal(amps) => format!("AC leakage below allowable ({})", view!(amps, Milli)),
                     AcHipotOutcome::Aborted => format!("AC hipot test aborted"),
-                    AcHipotOutcome::Passed(amps) => format!("AC hipot passed ({})", amps.display_milli(1)),
+                    AcHipotOutcome::Passed(amps) => format!("AC hipot passed ({})", view!(amps, Milli)),
                 }
             );
         }
     }
+}
 }

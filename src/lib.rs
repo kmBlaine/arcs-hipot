@@ -124,11 +124,24 @@ pub mod test_data;
 #[macro_use]
 pub mod units;
 pub mod devices;
+pub mod prelude
+{
+    //! Universally used data structures and traits
 
-pub use devices::{ ArHypotMax7704, Sci4520, Sci448 };
+    pub use crate::{
+        cmd::AcFrequency,
+        test_data::{ TestData, AcHipotOutcome, GndBondOutcome },
+        test_edit::{ AcHipotTestSpec, GndBondTestSpec },
+        units::{
+            Ampere, Ohm, Second, Volt,
+            scalar::{ Nano, Micro, Milli, Base, Kilo, Mega, Giga },
+        },
+    };
+}
 
 mod cmd;
 mod executor;
 mod test_edit;
 
 pub use test_edit::{ AcHipotTestSpec, GndBondTestSpec };
+pub use cmd::AcFrequency;
