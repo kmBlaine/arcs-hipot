@@ -11,6 +11,10 @@ pub enum AcHipotOutcome
     LeakExcessive(Ampere),
     /// The leakage current fell below the minimum acceptable limit
     LeakSubnormal(Ampere),
+    /// An arcing condition was detected
+    ArcFault,
+    /// The leakage exceeded the ground fault threshhold
+    GndFault,
     /// Operator aborted the test on the instrument UI
     Aborted,
     /// The leakage current was within acceptable limits
@@ -37,6 +41,7 @@ pub struct AcHipotData
 
 pub enum GndBondOutcome
 {
+    ResistanceOverflow,
     ResistanceExcessive(Ohm),
     ResistanceSubnormal(Ohm),
     Aborted,
@@ -90,7 +95,7 @@ impl std::error::Error for ParseTestTypeErr {}
 #[derive(Debug, Clone, Copy)]
 pub enum SciTestStatus
 {
-    /// "OFL"
+    /// "OFL", "Breakdown", "Short"
     Overflow,
     /// "HI-Limit"
     HiLimit,
@@ -102,8 +107,18 @@ pub enum SciTestStatus
     Dwell,
     /// "Abort"
     Abort,
+    /// "Arc-Fail"
+    ArcFail,
+    /// "GND-Fault"
+    GndFault,
     /// "Pass"
     Pass,
+}
+
+impl SciTestStatus
+{
+    /// Number of characters in the longest string variant of the status
+    pub const MAX_STR_LEN: usize = 9;
 }
 
 impl std::str::FromStr for SciTestStatus
@@ -114,6 +129,10 @@ impl std::str::FromStr for SciTestStatus
     {
         match status_str {
             "OFL" => Ok(Self::Overflow),
+            "Breakdown" => Ok(Self::Overflow),
+            "Short" => Ok(Self::Overflow),
+            "Arc-Fail" => Ok(Self::ArcFail),
+            "GND-Fault" => Ok(Self::GndFault),
             "HI-Limit" => Ok(Self::HiLimit),
             "LO-Limit" => Ok(Self::LoLimit),
             "Ramp" => Ok(Self::Ramp),
@@ -196,6 +215,15 @@ pub enum ParseTestDataErr
     /// An I/O error occurred while attempting retrieve the test data
     Io(std::io::Error),
 }
+
+// pub struct FormatError
+// {
+//     raw_data: String,
+//     line: usize,
+//     token: usize,
+//     mesg: &'static str,
+//     maybe_cause: Option<FormatErrorCause>,
+// }
 
 impl From<ParseTestStatusErr> for ParseTestDataErr
 {
@@ -367,5 +395,214 @@ impl std::str::FromStr for SciTestData
         Ok(Self {
             data: test_data
         })
+    }
+}
+
+pub(super) struct ArTestData
+{
+    data: TestData,
+}
+
+impl From<ArTestData> for TestData
+{
+    fn from(this: ArTestData) -> Self
+    {
+        this.data
+    }
+}
+
+impl std::str::FromStr for ArTestData
+{
+    type Err = ParseTestDataErr;
+
+    fn from_str(data_str: &str) -> Result<Self, Self::Err>
+    {
+        let (line1, line2) = if data_str.is_char_boundary(20) {
+            data_str.split_at(20)
+        }
+        else {
+            return Err(ParseTestDataErr::ResponseTooShort);
+        };
+
+        let (sequence_num, step_num) = {
+            // The format here is 'M #-#'
+            // I believe these have a memory location 50 which is why the space
+            if !(line2.is_char_boundary(1) && line2.is_char_boundary(5)) {
+                return Err(ParseTestDataErr::ResponseTooShort); // This is a unique failure mode
+            }
+
+            let mut nums_iter = (&line2[1..5]).split('-');
+            let seq = if let Some(num_str) = nums_iter.next() {
+                num_str.parse::<u32>()?
+            }
+            else {
+                // This should realistically be the only way we get this problem
+                return Err(ParseTestDataErr::ResponseTooShort);
+            };
+            let step = if let Some(num_str) = nums_iter.next() {
+                num_str.parse::<u32>()?
+            }
+            else {
+                // This should realistically be the only way we get this problem
+                return Err(ParseTestDataErr::ResponseTooShort);
+            };
+
+            (seq, step)
+        };
+
+        let test_type = if line1.is_char_boundary(3) {
+            (&line1[..3]).trim().parse::<SciTestType>()?
+        }
+        else {
+            return Err(ParseTestDataErr::InvalidTestType(ParseTestTypeErr{}));
+        };
+
+        // Insulation Resistance is not implemented yet but it has a different offset because it is only 2 characters long
+        let status_index = match test_type {
+            SciTestType::GndBond => 4,
+            SciTestType::AcHipot => 4,
+        };
+        let status_end = status_index + SciTestStatus::MAX_STR_LEN;
+
+        let test_status = if line1.is_char_boundary(status_index) && line1.is_char_boundary(status_end) {
+            (&line1[status_index..status_end]).trim().parse::<SciTestStatus>()?
+        }
+        else {
+            return Err(ParseTestDataErr::InvalidStatus(ParseTestStatusErr{}));
+        };
+
+        match test_type {
+            SciTestType::GndBond => {
+                let gnd_resistance = match test_status {
+                    SciTestStatus::HiLimit | SciTestStatus::LoLimit | SciTestStatus::Pass => {
+                        if line2.is_char_boundary(14) && line2.is_char_boundary(18) {
+                            let num_str = (&line2[14..18]).trim();
+                            
+                            if num_str.trim().starts_with('>') {
+                                None
+                            }
+                            else {
+                                Some(Ohm::from::<Milli>(num_str.parse::<u64>()?))
+                            }
+                        }
+                        else {
+                            // TODO better return type
+                            // this should be the only way this happens but not necessarily the only way
+                            return Err(ParseTestDataErr::ResponseTooShort);
+                        }
+                    },
+                    _ => {
+                        None
+                    }
+                };
+                let gnd_bond_data = GndBondData {
+                    sequence_num: sequence_num,
+                    step_num: step_num,
+                    outcome: match test_status {
+                        SciTestStatus::Abort => GndBondOutcome::Aborted,
+                        SciTestStatus::HiLimit => {
+                            if let Some(ohms) = gnd_resistance {
+                                GndBondOutcome::ResistanceExcessive(ohms)
+                            }
+                            else {
+                                GndBondOutcome::ResistanceOverflow
+                            }
+                        },
+                        SciTestStatus::LoLimit => {
+                            if let Some(ohms) = gnd_resistance {
+                                GndBondOutcome::ResistanceSubnormal(ohms)
+                            }
+                            else {
+                                return Err(ParseTestDataErr::ResponseTooShort);
+                            }
+                        }
+                        SciTestStatus::Pass => {
+                            if let Some(ohms) = gnd_resistance {
+                                GndBondOutcome::ResistanceSubnormal(ohms)
+                            }
+                            else {
+                                return Err(ParseTestDataErr::ResponseTooShort);
+                            }
+                        },
+                        _ => return Err(ParseTestDataErr::UnexpectedStatus(test_status)),
+                        // SciTestStatus::Overflow => ,
+                        // SciTestStatus::Ramp,
+                        // SciTestStatus::Dwell,
+                        // SciTestStatus::ArcFail,
+                        // SciTestStatus::GndFault,
+                    }
+                };
+                Ok(Self {
+                    data: TestData::GndBond(gnd_bond_data)
+                })
+            },
+            SciTestType::AcHipot => {
+                let leak_current = match test_status {
+                    SciTestStatus::HiLimit | SciTestStatus::LoLimit | SciTestStatus::Pass => {
+                        if line2.is_char_boundary(14) && line2.is_char_boundary(18) {
+                            let num_str = (&line2[14..18]).trim();
+                            
+                            if num_str.trim().starts_with('>') {
+                                None
+                            }
+                            else {
+                                Some(Ampere::from_f64::<Milli>(num_str.parse::<f64>()?))
+                            }
+                        }
+                        else {
+                            // TODO better return type
+                            // this should be the only way this happens but not necessarily the only way
+                            return Err(ParseTestDataErr::ResponseTooShort);
+                        }
+                    },
+                    _ => {
+                        None
+                    }
+                };
+                let ac_hipot_data = AcHipotData {
+                    sequence_num: sequence_num,
+                    step_num: step_num,
+                    outcome: match test_status {
+                        SciTestStatus::Abort => AcHipotOutcome::Aborted,
+                        SciTestStatus::Overflow => AcHipotOutcome::LeakOverflow,
+                        SciTestStatus::HiLimit => {
+                            if let Some(amps) = leak_current {
+                                AcHipotOutcome::LeakExcessive(amps)
+                            }
+                            else {
+                                AcHipotOutcome::LeakOverflow
+                            }
+                        },
+                        SciTestStatus::LoLimit => {
+                            if let Some(amps) = leak_current {
+                                AcHipotOutcome::LeakSubnormal(amps)
+                            }
+                            else {
+                                return Err(ParseTestDataErr::ResponseTooShort);
+                            }
+                        },
+                        SciTestStatus::GndFault => AcHipotOutcome::GndFault,
+                        SciTestStatus::ArcFail => AcHipotOutcome::ArcFault,
+                        SciTestStatus::Pass => {
+                            if let Some(amps) = leak_current {
+                                AcHipotOutcome::LeakSubnormal(amps)
+                            }
+                            else {
+                                return Err(ParseTestDataErr::ResponseTooShort);
+                            }
+                        },
+                        _ => return Err(ParseTestDataErr::UnexpectedStatus(test_status)),
+                        // SciTestStatus::Overflow => ,
+                        // SciTestStatus::Ramp,
+                        // SciTestStatus::Dwell,
+                        // SciTestStatus::ArcFail,
+                        // SciTestStatus::GndFault,
+                    }
+                };
+                Ok(Self {
+                    data: TestData::AcHipot(ac_hipot_data)
+                })
+            }
+        }
     }
 }
