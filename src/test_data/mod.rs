@@ -170,10 +170,7 @@ pub enum TestData
     GndBond(GndBondData),
 }
 
-pub(super) struct SciTestData
-{
-    data: TestData,
-}
+
 
 impl From<SciTestData> for TestData
 {
@@ -216,14 +213,61 @@ pub enum ParseTestDataErr
     Io(std::io::Error),
 }
 
-// pub struct FormatError
-// {
-//     raw_data: String,
-//     line: usize,
-//     token: usize,
-//     mesg: &'static str,
-//     maybe_cause: Option<FormatErrorCause>,
-// }
+#[derive(Debug)]
+enum FormatErrorCause
+{
+    Truncated,
+    InvalidInteger(std::num::ParseIntError),
+    InvalidDecimal(std::num::ParseFloatError),
+    InvalidEnum(&'static str),
+}
+
+impl fmt::Display for FormatErrorCause
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        match self {
+            Self::Truncated => f.write_str("No such token. String ends before this could be parsed"),
+            Self::InvalidDecimal(float_err) => write!(f, "Caused by: {}", float_err),
+            Self::InvalidInteger(int_err) => write!(f, "Caused by: {}", int_err),
+            Self::InvalidEnum(enum_err) => write!(f, "Unexpected or invalid variant. {}", enum_err),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FormatError
+{
+    raw_data: String,
+    line: usize,
+    token: usize,
+    mesg: &'static str,
+    maybe_cause: Option<FormatErrorCause>,
+}
+
+impl fmt::Display for FormatError
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        write!(f, "'{}'. At line {}, token {}: {}", self.raw_data, self.line, self.token, self.mesg)?;
+
+        if let Some(cause) = self.maybe_cause {
+            write!(f, ". {}", cause)
+        }
+        else {
+            Ok(())
+        }
+    }
+}
+
+impl Error for FormatError {}
+
+pub enum ParseError
+{
+    InvalidFormat(FormatError),
+    InvalidUtf8(std::string::FromUtf8Error),
+    Io(std::io::Error),
+}
 
 impl From<ParseTestStatusErr> for ParseTestDataErr
 {
@@ -292,111 +336,7 @@ impl fmt::Display for ParseTestDataErr
 
 impl std::error::Error for ParseTestDataErr {}
 
-impl std::str::FromStr for SciTestData
-{
-    type Err = ParseTestDataErr;
 
-    fn from_str(data_str: &str) -> Result<Self, Self::Err>
-    {
-        let mut sequence_num = None;
-        let mut step_num = None;
-        let mut test_status = None;
-        let mut test_type = None;
-        let mut hipot_leak = None;
-        let mut gnd_resistance = None;
-
-        for (index, token) in data_str.split(',').enumerate() {
-            if index == 0 {
-                sequence_num = Some(token.parse::<u32>()?);
-            }
-            else if index == 1 {
-                step_num = Some(token.parse::<u32>()?);
-            }
-            else if index == 2 {
-                test_type = Some(token.parse::<SciTestType>()?);
-            }
-            else if index == 3 {
-                let status = token.parse::<SciTestStatus>()?;
-                test_status = match status {
-                    SciTestStatus::Ramp | SciTestStatus::Dwell => 
-                        return Err(ParseTestDataErr::UnexpectedStatus(status)),
-                    status @ _ => Some(status),
-                };
-            }
-            // token at index 4 is just the ground dwell time and hipot voltage which we won't parse for now
-            else if index == 5 {
-                match test_type.as_ref().unwrap() {
-                    SciTestType::GndBond => match test_status.as_ref().unwrap() {
-                        SciTestStatus::Abort => (),
-                        _ => {
-                            gnd_resistance = Some(Ohm::from::<Milli>(token.parse::<u64>()?))
-                        },
-                    },
-                    SciTestType::AcHipot => match test_status.as_ref().unwrap() {
-                        SciTestStatus::Abort | SciTestStatus::Overflow => (),
-                        _ => {
-                            let milliamps = token.parse::<f64>()?;
-                            hipot_leak = Some(Ampere::from_f64::<Milli>(milliamps));
-                        }
-                    }
-                }
-                
-            }
-        }
-
-        if sequence_num.is_none() || step_num.is_none() || test_status.is_none() || test_type.is_none() {
-            return Err(ParseTestDataErr::ResponseTooShort);
-        }
-
-        let test_data = match test_type.unwrap() {
-            SciTestType::GndBond => {
-                if gnd_resistance.is_none() {
-                    match test_status.as_ref().unwrap() {
-                        SciTestStatus::Abort => (),
-                        _ => return Err(ParseTestDataErr::ResponseTooShort),
-                    }
-                }
-
-                TestData::GndBond(GndBondData {
-                    sequence_num: sequence_num.unwrap(),
-                    step_num: step_num.unwrap(),
-                    outcome: match test_status.unwrap() {
-                        SciTestStatus::HiLimit => GndBondOutcome::ResistanceExcessive(gnd_resistance.unwrap()),
-                        SciTestStatus::LoLimit => GndBondOutcome::ResistanceSubnormal(gnd_resistance.unwrap()),
-                        SciTestStatus::Abort => GndBondOutcome::Aborted,
-                        SciTestStatus::Pass => GndBondOutcome::Passed(gnd_resistance.unwrap()),
-                        status @ _ => return Err(ParseTestDataErr::UnexpectedStatus(status)),
-                    }
-                })
-            },
-            SciTestType::AcHipot => {
-                if hipot_leak.is_none() {
-                    match test_status.as_ref().unwrap() {
-                        SciTestStatus::Abort | SciTestStatus::Overflow => (),
-                        _ => return Err(ParseTestDataErr::ResponseTooShort),
-                    }
-                }
-
-                TestData::AcHipot(AcHipotData {
-                    sequence_num: sequence_num.unwrap(),
-                    step_num: step_num.unwrap(),
-                    outcome: match test_status.unwrap() {
-                        SciTestStatus::Overflow => AcHipotOutcome::LeakOverflow,
-                        SciTestStatus::HiLimit => AcHipotOutcome::LeakExcessive(hipot_leak.unwrap()),
-                        SciTestStatus::LoLimit => AcHipotOutcome::LeakSubnormal(hipot_leak.unwrap()),
-                        SciTestStatus::Abort => AcHipotOutcome::Aborted,
-                        SciTestStatus::Pass => AcHipotOutcome::Passed(hipot_leak.unwrap()),
-                        status @ _ => return Err(ParseTestDataErr::UnexpectedStatus(status)),
-                    }
-                })
-            },
-        };
-
-        Ok(Self {
-            data: test_data
-        })
-    }
-}
 
 pub(super) struct ArTestData
 {
