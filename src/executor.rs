@@ -4,7 +4,9 @@ use std::{ io };
 use tokio::io::{ AsyncWriteExt, AsyncReadExt };
 use crate::{
     cmd::{ CmdSet, CmdDisplayFactory, SciMultiSeqDisplay, SciSingleSeqDisplay, AssociatedResearchDisplay },
-    test_data::{ TestData, SciTestData, ParseTestDataErr }
+    test_data::{ ParseError, FormatError, TestData },
+    test_data::sci::SciTestData,
+    test_data::ar::ArTestData,
 };
 // use units::{ Ampere, Volt, Ohm, Second, Milli, Micro, Base, Kilo };
 
@@ -158,9 +160,9 @@ impl <T, D> Executor<T, D>
         &mut self,
         step_num: u32,
     )
-        -> Result<P, ParseTestDataErr>
+        -> Result<P, ParseError>
 
-        where P: std::str::FromStr<Err = ParseTestDataErr>,
+        where P: std::str::FromStr<Err = FormatError>,
     {
         let response_len = self.exec_cmd(CmdSet::GetTestData(step_num)).await?;
         let response = self.get_string(response_len)?;
@@ -195,7 +197,7 @@ impl <T> SciSingleExecutor<T>
         self.delegate.exec_all(cmds).await
     }
 
-    pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseTestDataErr>
+    pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseError>
     {
         let data = self.delegate.get_test_data::<SciTestData>(step_num).await?;
         Ok(data.into())
@@ -227,7 +229,7 @@ impl <T> SciMultiExecutor<T>
         self.delegate.exec_all(cmds).await
     }
 
-    pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseTestDataErr>
+    pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseError>
     {
         let data = self.delegate.get_test_data::<SciTestData>(step_num).await?;
         Ok(data.into())
@@ -259,8 +261,9 @@ impl <T> ArExecutor<T>
         self.delegate.exec_all(cmds).await
     }
 
-    pub async fn get_test_data(&mut self, _step_num: u32) -> Result<TestData, ParseTestDataErr>
+    pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseError>
     {
-        unimplemented!("Parsing of Associated Research device memory is not complete")
+        let data = self.delegate.get_test_data::<ArTestData>(step_num).await?;
+        Ok(data.into())
     }
 }

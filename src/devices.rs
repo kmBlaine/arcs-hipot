@@ -178,7 +178,7 @@ macro_rules! define_device
                 TestEditor as TestEditorDelegate, StepInfo, GndBondDeviceLimits, AcHipotDeviceLimits,
                 TestParams, AcHipotTestSpec, GndBondTestSpec
             },
-            test_data::{ TestData, ParseTestDataErr },
+            test_data::{ TestData, ParseError },
             units::{ Ampere, Volt, Ohm, Second, scalar::{ Milli, Kilo, Micro }}
         };
         use tokio::io::{ AsyncWriteExt, AsyncReadExt };
@@ -224,7 +224,7 @@ macro_rules! define_device
                 Ok(())
             }
 
-            pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseTestDataErr>
+            pub async fn get_test_data(&mut self, step_num: u32) -> Result<TestData, ParseError>
             {
                 self.io_handle.get_test_data(step_num).await
             }

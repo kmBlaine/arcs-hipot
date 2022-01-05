@@ -1,7 +1,46 @@
+//! SCI test results and data parsing
+
+use std::{
+    fmt,
+    error::Error,
+    convert::From,
+};
+
+use crate::{
+    units::{ Ampere, Volt, Ohm, scalar::Milli },
+    test_data::{ AcHipotOutcome, GndBondOutcome, FormatError, FormatErrorCause, TestData, GndBondData, AcHipotData },
+};
+
+macro_rules! parse_token
+{
+    ( $tok:expr, $tok_type:ty, $ln:expr, $idx:expr, $fail_mesg:expr, $raw_str:expr ) => {
+        if let Some(token) = $tok {
+            token.parse::<$tok_type>()
+                .map_err(|err| {
+                    FormatError {
+                        raw_data: String::from($raw_str),
+                        line: $ln,
+                        token: $idx,
+                        mesg: $fail_mesg,
+                        maybe_cause: Some(FormatErrorCause::from(err))
+                    }
+                })
+        }
+        else {
+            Err(FormatError {
+                raw_data: String::from($raw_str),
+                line: $ln,
+                token: $idx,
+                mesg: $fail_mesg,
+                maybe_cause: Some(FormatErrorCause::Truncated),
+            })
+        }
+    }
+}
 
 macro_rules! impl_parse_enum_err
 {
-    { $name:ty, $err_str:literal } => {
+    { $name:ident, $err_str:literal } => {
         impl $name
         {
             fn valid_str_variants() -> &'static str
@@ -30,12 +69,15 @@ macro_rules! impl_parse_enum_err
     }
 }
 
+#[derive(Debug)]
 struct ParseTestTypeErr {}
 impl_parse_enum_err!{ ParseTestTypeErr, "Expected one of ['GND', 'ACW'] (case sensitive)" }
 
+#[derive(Debug)]
 struct ParseGndBondStatusErr {}
 impl_parse_enum_err!{ ParseGndBondStatusErr, "Expected one of ['HI-Limit', 'LO-Limit', 'Abort', 'Pass'] (case sensitive)" }
 
+#[derive(Debug)]
 struct ParseAcHipotStatusErr {}
 impl_parse_enum_err!{ ParseAcHipotStatusErr, "Expected one of ['OFL', 'HI-Limit', 'LO-Limit', 'Abort', 'Pass'] (case sensitive)" }
 
@@ -45,7 +87,7 @@ enum TestType
     AcHipot,
 }
 
-impl std::str:FromStr for TestType
+impl std::str::FromStr for TestType
 {
     type Err = ParseTestTypeErr;
 
@@ -67,15 +109,15 @@ enum GndBondStatus
     Pass,
 }
 
-impl std::str:FromStr for GndBondStatus
+impl std::str::FromStr for GndBondStatus
 {
     type Err = ParseGndBondStatusErr;
 
     fn from_str(data_str: &str) -> Result<Self, Self::Err>
     {
         match data_str {
-            "HI-Limit" => Ok(Self::GndBond),
-            "LO-Limit" => Ok(Self::AcHipot),
+            "HI-Limit" => Ok(Self::HiLimit),
+            "LO-Limit" => Ok(Self::LoLimit),
             "Abort" => Ok(Self::Abort),
             "Pass" => Ok(Self::Pass),
             _ => Err(ParseGndBondStatusErr {})
@@ -92,7 +134,7 @@ enum AcHipotStatus
     Pass,
 }
 
-impl std::str:FromStr for AcHipotStatus
+impl std::str::FromStr for AcHipotStatus
 {
     type Err = ParseAcHipotStatusErr;
 
@@ -109,30 +151,37 @@ impl std::str:FromStr for AcHipotStatus
     }
 }
 
-pub(super) struct SciTestData
+pub struct SciTestData
 {
     data: TestData,
 }
 
+impl From<SciTestData> for TestData
+{
+    fn from(this: SciTestData) -> Self
+    {
+        this.data
+    }
+}
+
 impl SciTestData
 {
-    fn parse_gnd_bond<I>(
+    fn parse_gnd_bond<'a, I>(
         sequence_num: u32,
         step_num: u32,
         mut tokens: I,
-        mut current_index: usize,
         data_str: &str,
     )
-        -> Result<Self, ParseTestDataErr>
+        -> Result<Self, FormatError>
 
-        where I: std::iter::Iterator<(usize, &str)>
+        where I: std::iter::Iterator<Item = &'a str>
     {
         let status = parse_token!(tokens.next(), GndBondStatus, 1, 4, "failed to parse ground bond status", data_str)?;
 
         // This is just a progress value. Not relevant to final output
         tokens.next();
 
-        TestData::GndBond(GndBondData {
+        let data = TestData::GndBond(GndBondData {
             sequence_num: sequence_num,
             step_num: step_num,
             outcome: match status {
@@ -150,19 +199,20 @@ impl SciTestData
                     GndBondOutcome::Passed(Ohm::from::<Milli>(gnd_resistance))
                 },
             }
-        })
+        });
+
+        Ok(Self { data: data })
     }
 
-    fn parse_ac_hipot<I>(
+    fn parse_ac_hipot<'a, I>(
         sequence_num: u32,
         step_num: u32,
         mut tokens: I,
-        mut current_index: usize,
         data_str: &str,
     )
-        -> Result<Self, ParseTestDataErr>
+        -> Result<Self, FormatError>
 
-        where I: std::iter::Iterator<&str>
+        where I: std::iter::Iterator<Item = &'a str>
     {
         let status = parse_token!(tokens.next(), AcHipotStatus, 1, 4, "failed to parse AC hipot status", data_str)?;
 
@@ -173,19 +223,19 @@ impl SciTestData
             sequence_num: sequence_num,
             step_num: step_num,
             outcome: match status {
-                AcHipotStatus::Overflow => AcHipotOutcome::Overflow,
+                AcHipotStatus::Overflow => AcHipotOutcome::LeakOverflow,
                 AcHipotStatus::HiLimit => {
                     let leak_current = parse_token!(tokens.next(), f64, 1, 6, "failed to parse hipot leak current", data_str)?;
-                    GndBondOutcome::ResistanceExcessive(Ampere::from_f64::<Milli>(leak_current))
+                    AcHipotOutcome::LeakExcessive(Ampere::from_f64::<Milli>(leak_current))
                 },
                 AcHipotStatus::LoLimit => {
                     let leak_current = parse_token!(tokens.next(), f64, 1, 6, "failed to parse hipot leak current", data_str)?;
-                    GndBondOutcome::ResistanceSubnormal(Ampere::from_f64::<Milli>(leak_current))
+                    AcHipotOutcome::LeakSubnormal(Ampere::from_f64::<Milli>(leak_current))
                 },
-                AcHipotStatus::Abort => GndBondOutcome::Aborted,
+                AcHipotStatus::Abort => AcHipotOutcome::Aborted,
                 AcHipotStatus::Pass => {
                     let leak_current = parse_token!(tokens.next(), f64, 1, 6, "failed to parse hipot leak current", data_str)?;
-                    GndBondOutcome::Passed(Ampere::from_f64::<Milli>(leak_current))
+                    AcHipotOutcome::Passed(Ampere::from_f64::<Milli>(leak_current))
                 },
             }
         });
@@ -198,7 +248,7 @@ impl SciTestData
 
 impl std::str::FromStr for SciTestData
 {
-    type Err = ParseTestDataErr;
+    type Err = FormatError;
 
     fn from_str(data_str: &str) -> Result<Self, Self::Err>
     {
@@ -208,8 +258,8 @@ impl std::str::FromStr for SciTestData
         let test_type = parse_token!(tokens.next(), TestType, 1, 3, "failed to parse test type", data_str)?;
 
         match test_type {
-            TestType::GndBond => Self::parse_gnd_bond(sequence_num, step_num, tokens),
-            TestType::AcHipot => Self::parse_ac_hipot(sequence_num, step_num, tokens),
+            TestType::GndBond => Self::parse_gnd_bond(sequence_num, step_num, tokens, data_str),
+            TestType::AcHipot => Self::parse_ac_hipot(sequence_num, step_num, tokens, data_str),
         }
     }
 }

@@ -1,6 +1,15 @@
-use crate::units::{ Ampere, Volt, Ohm, scalar::Milli };
-use std::fmt;
+//! Test results and data parsing
 
+use crate::units::{ Ampere, Volt, Ohm, scalar::Milli };
+use std::{
+    fmt,
+    error::Error,
+};
+
+pub(crate) mod sci;
+pub(crate) mod ar;
+
+#[derive(Debug, Clone)]
 pub enum AcHipotOutcome
 {
     /// The leakage current exceeded the instrumet's metering range
@@ -32,6 +41,7 @@ impl AcHipotOutcome
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct AcHipotData
 {
     pub sequence_num: u32,
@@ -39,6 +49,7 @@ pub struct AcHipotData
     pub outcome: AcHipotOutcome,
 }
 
+#[derive(Debug, Clone)]
 pub enum GndBondOutcome
 {
     ResistanceOverflow,
@@ -59,6 +70,7 @@ impl GndBondOutcome
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct GndBondData
 {
     pub sequence_num: u32,
@@ -66,18 +78,11 @@ pub struct GndBondData
     pub outcome: GndBondOutcome
 }
 
+#[derive(Debug, Clone)]
 pub enum TestData
 {
     AcHipot(AcHipotData),
     GndBond(GndBondData),
-}
-
-impl From<SciTestData> for TestData
-{
-    fn from(this: SciTestData) -> Self
-    {
-        this.data
-    }
 }
 
 /// A description of the underlying cause of the parsing failure, if any
@@ -164,7 +169,7 @@ impl fmt::Display for FormatError
     {
         write!(f, "At line {}, token {}: {}", self.line, self.token, self.mesg)?;
 
-        if let Some(cause) = self.maybe_cause {
+        if let Some(cause) = &self.maybe_cause {
             write!(f, ". {}", cause)
         }
         else {
@@ -176,6 +181,7 @@ impl fmt::Display for FormatError
 impl Error for FormatError {}
 
 /// An error describing a failure to parse test data
+#[derive(Debug)]
 pub enum ParseError
 {
     /// The data does not appear to be in the expected format
@@ -228,63 +234,5 @@ impl From<FormatError> for ParseError
     fn from(this: FormatError) -> Self
     {
         ParseError::InvalidFormat(this)
-    }
-}
-
-macro_rules! parse_token
-{
-    ( $tok:expr, $tok_type:ty, $ln:expr, $idx:expr, $fail_mesg:expr, $raw_str:expr ) => {
-        if let Some(token) = $tok {
-            token.parse::<$tok_type>()
-                .map_err(|err| {
-                    FormatError {
-                        raw_data: String::from($raw_str),
-                        line: $ln,
-                        token: $idx,
-                        mesg: $fail_mesg,
-                        maybe_cause: Some(FormatErrorCause::from(err))
-                    }
-                })
-        }
-        else {
-            Err(FormatError {
-                raw_data: String::from($raw_str),
-                line: $ln,
-                token: $idx,
-                mesg: $fail_mesg,
-                maybe_cause: Some(FormatErrorCause::Truncated),
-            })
-        }
-    }
-}
-
-macro_rules! impl_parse_enum_err
-{
-    { $name:ty, $err_str:literal } => {
-        impl $name
-        {
-            fn valid_str_variants() -> &'static str
-            {
-                $err_str
-            }
-        }
-
-        impl fmt::Display for $name
-        {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-            {
-                f.write_str(Self::valid_str_variants())
-            }
-        }
-
-        impl std::error::Error for $name {}
-
-        impl From<$name> for super::FormatErrorCause
-        {
-            fn from(_this: $name) -> FormatErrorCause
-            {
-                FormatErrorCause::InvalidEnum($name::valid_str_variants())
-            }
-        }
     }
 }
