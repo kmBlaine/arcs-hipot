@@ -249,22 +249,34 @@ impl ArTestData
 
         // This is just a progress value. Not relevant to final output
         tokens2.next();
+        let resistance = if let Some(res) = tokens2.next() {
+            res
+        }
+        else {
+            return Err(FormatError {
+                raw_data: String::from(data_str),
+                line: 2,
+                token: 3,
+                mesg: "failed to parse ground resistance",
+                maybe_cause: Some(FormatErrorCause::Truncated),
+            })
+        };
 
         let data = TestData::GndBond(GndBondData {
             sequence_num: sequence_num,
             step_num: step_num,
             outcome: match status {
                 GndBondStatus::HiLimit => {
-                    let gnd_resistance = parse_token!(tokens2.next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
+                    let gnd_resistance = parse_token!(resistance.split('m').next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
                     GndBondOutcome::ResistanceExcessive(Ohm::from::<Milli>(gnd_resistance))
                 },
                 GndBondStatus::LoLimit => {
-                    let gnd_resistance = parse_token!(tokens2.next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
+                    let gnd_resistance = parse_token!(resistance.split('m').next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
                     GndBondOutcome::ResistanceSubnormal(Ohm::from::<Milli>(gnd_resistance))
                 },
                 GndBondStatus::Abort => GndBondOutcome::Aborted,
                 GndBondStatus::Pass => {
-                    let gnd_resistance = parse_token!(tokens2.next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
+                    let gnd_resistance = parse_token!(resistance.split('m').next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
                     GndBondOutcome::Passed(Ohm::from::<Milli>(gnd_resistance))
                 },
             }
@@ -290,23 +302,37 @@ impl std::str::FromStr for ArTestData
                 raw_data: String::from(data_str),
                 line: 1,
                 token: 0,
-                mesg: "byte at index 20 is out of bounds or not a UTF8 code point boundary",
+                mesg: "Unexpected linebreak boundary. Byte at index 20 is out of bounds or not a UTF8 code point boundary",
                 maybe_cause: None,
             });
         };
 
         let line_broken_data = String::from(line1) + "\n" + line2;
+
+        let line2 = if line2.is_char_boundary(1) {
+            line2.split_at(1).1
+        }
+        else {
+            return Err(FormatError {
+                raw_data: line_broken_data,
+                line: 2,
+                token: 0,
+                mesg: "Cannot truncate step indicator prefix. Byte at index 1 is out of bounds or not a UTF8 code point boundary",
+                maybe_cause: None,
+            });
+        };
+
         let mut tokens1 = line1.split(' ').filter(|tok| !tok.is_empty());
         let mut tokens2 = line2.split(' ').filter(|tok| !tok.is_empty());
 
         let (sequence_num, step_num) = if let Some(seq_tok) = tokens2.next() {
-            let mut seq_step_iter = seq_tok.split(&[' ', 'M', '-'][..]).filter(|tok| !tok.is_empty());
+            let mut seq_step_iter = seq_tok.split('-').filter(|tok| !tok.is_empty());
             let seq_tok = seq_step_iter.next();
             let step_tok = seq_step_iter.next();
 
             if seq_tok.is_none() || step_tok.is_none() {
                 return Err(FormatError {
-                    raw_data: String::from(data_str),
+                    raw_data: line_broken_data,
                     line: 2,
                     token: 1,
                     mesg: "expected a sequence indicator in format 'M#-#'",
@@ -335,5 +361,28 @@ impl std::str::FromStr for ArTestData
             TestType::GndBond => Self::parse_gnd_bond(sequence_num, step_num, tokens1, tokens2, &line_broken_data),
             TestType::AcHipot => Self::parse_ac_hipot(sequence_num, step_num, tokens1, tokens2, &line_broken_data),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests
+{
+    use super::ArTestData;
+
+    #[test]
+    fn parse_gnd_bond_pass()
+    {
+        let gnd_pass_str = "GND Pass        1.0sM 1-1 25.00A    14mΩ";
+        let res = gnd_pass_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref _test_data) => (),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_ok());
     }
 }
