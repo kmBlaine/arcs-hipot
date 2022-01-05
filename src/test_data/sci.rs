@@ -109,34 +109,6 @@ impl std::str:FromStr for AcHipotStatus
     }
 }
 
-macro_rules! parse_token
-{
-    ( $tok:expr, $tok_type:ty, $ln:expr, $idx:ident, $fail_mesg:expr, $raw_str:expr ) => {
-        if let Some((index, token)) = $tok {
-            $idx = index;
-            token.parse::<$tok_type>()
-                .map_err(|err| {
-                    FormatError {
-                        raw_data: String::from($raw_str),
-                        line: $ln,
-                        token: index + 1,
-                        mesg: $fail_mesg,
-                        cause: Some(FormatErrorCause::from(err))
-                    }
-                })
-        }
-        else {
-            Err(FormatError {
-                raw_data: String::from($raw_str),
-                line: $ln,
-                token: $idx + 2,
-                mesg: $fail_mesg,
-                cause: Some(FormatErrorCause::Truncated),
-            })
-        }
-    }
-}
-
 pub(super) struct SciTestData
 {
     data: TestData,
@@ -155,7 +127,7 @@ impl SciTestData
 
         where I: std::iter::Iterator<(usize, &str)>
     {
-        let status = parse_token!(tokens.next(), GndBondStatus, 1, current_index, "failed to parse ground bond status", data_str)?;
+        let status = parse_token!(tokens.next(), GndBondStatus, 1, 4, "failed to parse ground bond status", data_str)?;
 
         // This is just a progress value. Not relevant to final output
         tokens.next();
@@ -165,16 +137,16 @@ impl SciTestData
             step_num: step_num,
             outcome: match status {
                 GndBondStatus::HiLimit => {
-                    let gnd_resistance = parse_token!(tokens.next(), u64, 1, current_index, "failed to parse ground resistance", data_str)?;
+                    let gnd_resistance = parse_token!(tokens.next(), u64, 1, 6, "failed to parse ground resistance", data_str)?;
                     GndBondOutcome::ResistanceExcessive(Ohm::from::<Milli>(gnd_resistance))
                 },
                 GndBondStatus::LoLimit => {
-                    let gnd_resistance = parse_token!(tokens.next(), u64, 1, current_index, "failed to parse ground resistance", data_str)?;
+                    let gnd_resistance = parse_token!(tokens.next(), u64, 1, 6, "failed to parse ground resistance", data_str)?;
                     GndBondOutcome::ResistanceSubnormal(Ohm::from::<Milli>(gnd_resistance))
                 },
                 GndBondStatus::Abort => GndBondOutcome::Aborted,
                 GndBondStatus::Pass => {
-                    let gnd_resistance = parse_token!(tokens.next(), u64, 1, current_index, "failed to parse ground resistance", data_str)?;
+                    let gnd_resistance = parse_token!(tokens.next(), u64, 1, 6, "failed to parse ground resistance", data_str)?;
                     GndBondOutcome::Passed(Ohm::from::<Milli>(gnd_resistance))
                 },
             }
@@ -190,9 +162,9 @@ impl SciTestData
     )
         -> Result<Self, ParseTestDataErr>
 
-        where I: std::iter::Iterator<(usize, &str)>
+        where I: std::iter::Iterator<&str>
     {
-        let status = parse_token!(tokens.next(), AcHipotStatus, 1, current_index, "failed to parse ground bond status", data_str)?;
+        let status = parse_token!(tokens.next(), AcHipotStatus, 1, 4, "failed to parse AC hipot status", data_str)?;
 
         // This is just a progress value. Not relevant to final output
         tokens.next();
@@ -203,16 +175,16 @@ impl SciTestData
             outcome: match status {
                 AcHipotStatus::Overflow => AcHipotOutcome::Overflow,
                 AcHipotStatus::HiLimit => {
-                    let leak_current = parse_token!(tokens.next(), f64, 1, current_index, "failed to parse hipot leak current", data_str)?;
+                    let leak_current = parse_token!(tokens.next(), f64, 1, 6, "failed to parse hipot leak current", data_str)?;
                     GndBondOutcome::ResistanceExcessive(Ampere::from_f64::<Milli>(leak_current))
                 },
                 AcHipotStatus::LoLimit => {
-                    let leak_current = parse_token!(tokens.next(), f64, 1, current_index, "failed to parse hipot leak current", data_str)?;
+                    let leak_current = parse_token!(tokens.next(), f64, 1, 6, "failed to parse hipot leak current", data_str)?;
                     GndBondOutcome::ResistanceSubnormal(Ampere::from_f64::<Milli>(leak_current))
                 },
                 AcHipotStatus::Abort => GndBondOutcome::Aborted,
                 AcHipotStatus::Pass => {
-                    let leak_current = parse_token!(tokens.next(), f64, 1, current_index, "failed to parse hipot leak current", data_str)?;
+                    let leak_current = parse_token!(tokens.next(), f64, 1, 6, "failed to parse hipot leak current", data_str)?;
                     GndBondOutcome::Passed(Ampere::from_f64::<Milli>(leak_current))
                 },
             }
@@ -230,15 +202,14 @@ impl std::str::FromStr for SciTestData
 
     fn from_str(data_str: &str) -> Result<Self, Self::Err>
     {
-        let mut current_index = 0;
-        let mut tokens = data_str.split(',').filter(|tok| !tok.is_empty()).enumerate();
-        let sequence_num = parse_token!(tokens.next(), u32, 1, current_index, "failed to parse sequence number", data_str)?;
-        let step_num = parse_token!(tokens.next(), u32, 1, current_index, "failed to parse step number", data_str)?;
-        let test_type = parse_token!(tokens.next(), TestType, 1, current_index, "failed to parse test type", data_str)?;
+        let mut tokens = data_str.split(',').filter(|tok| !tok.is_empty());
+        let sequence_num = parse_token!(tokens.next(), u32, 1, 1, "failed to parse sequence number", data_str)?;
+        let step_num = parse_token!(tokens.next(), u32, 1, 2, "failed to parse step number", data_str)?;
+        let test_type = parse_token!(tokens.next(), TestType, 1, 3, "failed to parse test type", data_str)?;
 
         match test_type {
-            TestType::GndBond => Self::parse_gnd_bond(sequence_num, step_num, tokens, current_index),
-            TestType::AcHipot => Self::parse_ac_hipot(sequence_num, step_num, tokens, current_index),
+            TestType::GndBond => Self::parse_gnd_bond(sequence_num, step_num, tokens),
+            TestType::AcHipot => Self::parse_ac_hipot(sequence_num, step_num, tokens),
         }
     }
 }

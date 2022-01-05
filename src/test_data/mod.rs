@@ -13,7 +13,7 @@ pub enum AcHipotOutcome
     LeakSubnormal(Ampere),
     /// An arcing condition was detected
     ArcFault,
-    /// The leakage exceeded the ground fault threshhold
+    /// The high voltage lead has connected directly to earth, skipping the ground return lead
     GndFault,
     /// Operator aborted the test on the instrument UI
     Aborted,
@@ -66,111 +66,11 @@ pub struct GndBondData
     pub outcome: GndBondOutcome
 }
 
-#[derive(Debug)]
-pub struct ParseTestStatusErr {}
-
-impl fmt::Display for ParseTestStatusErr
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
-        write!(f, "Unrecognized status. Acceptable test statuses are ['OFL', 'HI-Limit', 'LO-Limit', 'Ramp', 'Dwell', 'Abort', 'Pass'] (case sensitive)")
-    }
-}
-
-impl std::error::Error for ParseTestStatusErr {}
-
-#[derive(Debug)]
-pub struct ParseTestTypeErr {}
-
-impl fmt::Display for ParseTestTypeErr
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
-        write!(f, "Unrecognized test type. Acceptable test types are ['ACW', 'GND'] (case sensitive)")
-    }
-}
-
-impl std::error::Error for ParseTestTypeErr {}
-
-#[derive(Debug, Clone, Copy)]
-pub enum SciTestStatus
-{
-    /// "OFL", "Breakdown", "Short"
-    Overflow,
-    /// "HI-Limit"
-    HiLimit,
-    /// "LO-Limit"
-    LoLimit,
-    /// "Ramp"
-    Ramp,
-    /// "Dwell"
-    Dwell,
-    /// "Abort"
-    Abort,
-    /// "Arc-Fail"
-    ArcFail,
-    /// "GND-Fault"
-    GndFault,
-    /// "Pass"
-    Pass,
-}
-
-impl SciTestStatus
-{
-    /// Number of characters in the longest string variant of the status
-    pub const MAX_STR_LEN: usize = 9;
-}
-
-impl std::str::FromStr for SciTestStatus
-{
-    type Err = ParseTestStatusErr;
-
-    fn from_str(status_str: &str) -> Result<Self, Self::Err>
-    {
-        match status_str {
-            "OFL" => Ok(Self::Overflow),
-            "Breakdown" => Ok(Self::Overflow),
-            "Short" => Ok(Self::Overflow),
-            "Arc-Fail" => Ok(Self::ArcFail),
-            "GND-Fault" => Ok(Self::GndFault),
-            "HI-Limit" => Ok(Self::HiLimit),
-            "LO-Limit" => Ok(Self::LoLimit),
-            "Ramp" => Ok(Self::Ramp),
-            "Dwell" => Ok(Self::Dwell),
-            "Abort" => Ok(Self::Abort),
-            "Pass" => Ok(Self::Pass),
-            _ => Err(ParseTestStatusErr{})
-        }
-    }
-}
-
-pub(super) enum SciTestType
-{
-    GndBond,
-    AcHipot,
-}
-
-impl std::str::FromStr for SciTestType
-{
-    type Err = ParseTestTypeErr;
-
-    fn from_str(status_str: &str) -> Result<Self, Self::Err>
-    {
-        match status_str {
-            "ACW" => Ok(Self::AcHipot),
-            "GND" => Ok(Self::GndBond),
-            _ => Err(ParseTestTypeErr{})
-        }
-    }
-}
-
 pub enum TestData
 {
     AcHipot(AcHipotData),
     GndBond(GndBondData),
 }
-
-
 
 impl From<SciTestData> for TestData
 {
@@ -180,45 +80,30 @@ impl From<SciTestData> for TestData
     }
 }
 
-#[derive(Debug)]
-pub enum ParseTestDataErr
-{
-    /// The device did not send back a complete response
-    ResponseTooShort,
-    /// The test type token was not one of [`GND`, `ACW`]
-    InvalidTestType(ParseTestTypeErr),
-    /// The test status indicated the test was incomplete or was unexpected for the type of test.
-    ///
-    /// Ground bond tests expect one of Pass, Abort, HiLimit, or LoLimit. AC hipot tests expect one
-    /// of Pass, Abort, HiLimit, LoLimit, or Overflow. Dwell or Ramp indicate that the test has not
-    /// yet finished.
-    UnexpectedStatus(SciTestStatus),
-    /// Invalid status token encountered when attempting to parse the test status from the string
-    InvalidStatus(ParseTestStatusErr),
-    /// Invalid data encountered when attempting to parse the memory location or ground resistance
-    /// value
-    InvalidInteger(std::num::ParseIntError),
-    /// Invalid data encountered when attempting to parse the hipot leakage current
-    InvalidDecimal(std::num::ParseFloatError),
-    /// The string returned by the device could not be interpreted as valid UTF8
-    ///
-    /// # Implementation Notes
-    /// These devices will reply with extended ASCII encoding. The library explicitly substitutes
-    /// extended ASCII bytes when reading the byte data from the device for an appropriate UTF8
-    /// character. At the time this library was written, the only known instance of the use of
-    /// extended ASCII however was the omega character for resistance values. Others may be lurking
-    /// unaccounted for.
-    InvalidUtf8(std::string::FromUtf8Error),
-    /// An I/O error occurred while attempting retrieve the test data
-    Io(std::io::Error),
-}
-
+/// A description of the underlying cause of the parsing failure, if any
 #[derive(Debug)]
 enum FormatErrorCause
 {
+    /// The string was not of the expected length
+    ///
+    /// # Implementation Notes
+    /// The parsers tokenize the string using spaces and more specifically the `split()` method
+    /// on a `str`. This error will most likely occur when an insufficient number of tokens were
+    /// created causing the iterator to terminate early. However, there are other reasons this can
+    /// be returned.
     Truncated,
+    /// Expected an integer value
     InvalidInteger(std::num::ParseIntError),
+    /// Expected a decimal value
     InvalidDecimal(std::num::ParseFloatError),
+    /// Expected one of a fixed set of values
+    ///
+    /// The contained string contains a description of which values were expected.
+    ///
+    /// # Implementation Notes
+    /// The parsers will explicitly reject test status variants which indicate that the test is still
+    /// running such as "Dwell" or "Ramp". This is by design so that "results" are not accidentally
+    /// retrieved for incomplete tests.
     InvalidEnum(&'static str),
 }
 
@@ -235,13 +120,41 @@ impl fmt::Display for FormatErrorCause
     }
 }
 
+impl From<std::num::ParseIntError> for FormatErrorCause
+{
+    fn from(this: std::num::ParseIntError) -> Self
+    {
+        Self::InvalidInteger(this)
+    }
+}
+
+impl From<std::num::ParseFloatError> for FormatErrorCause
+{
+    fn from(this: std::num::ParseFloatError) -> Self
+    {
+        Self::InvalidDecimal(this)
+    }
+}
+
+/// A parsing error caused by a test result string of unexpected or invalid format
 #[derive(Debug)]
 pub struct FormatError
 {
-    raw_data: String,
+    /// The string returned by the device
+    ///
+    /// Note that for Associated Research devices, it does not include a line break between the two
+    /// lines of display text that it returns. The parser will insert one for easier debugging by a
+    /// human.
+    pub raw_data: String,
+    /// The line number of the error
     line: usize,
+    /// Which token the error occurred at. Indexed from 1
+    ///
+    /// Tokens should be regarded as a space separated.
     token: usize,
+    /// A message from the parsing routines about what went wrong
     mesg: &'static str,
+    /// Some underlying cause, if any
     maybe_cause: Option<FormatErrorCause>,
 }
 
@@ -249,7 +162,7 @@ impl fmt::Display for FormatError
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
-        write!(f, "'{}'. At line {}, token {}: {}", self.raw_data, self.line, self.token, self.mesg)?;
+        write!(f, "At line {}, token {}: {}", self.line, self.token, self.mesg)?;
 
         if let Some(cause) = self.maybe_cause {
             write!(f, ". {}", cause)
@@ -262,286 +175,115 @@ impl fmt::Display for FormatError
 
 impl Error for FormatError {}
 
+/// An error describing a failure to parse test data
 pub enum ParseError
 {
+    /// The data does not appear to be in the expected format
     InvalidFormat(FormatError),
+    /// The data returned by the device could not be interpreted as a valid UTF8 string
+    ///
+    /// # Implementation Notes
+    /// These devices will reply with extended ASCII encoding, which (naturally) by themselves are
+    /// virtually never valid UTF8. However, the only two known instances of this are the mu and
+    /// omega characters for the micro- prefix and ohm symbol, respectively. The library explicitly
+    /// substitutes these for valid UTF8. Thus, an encoding error _should_ only come up in the case
+    /// of a serial hotplug or an incorrect baud rate setting.
     InvalidUtf8(std::string::FromUtf8Error),
+    /// An I/O error occurred while trying to query the device for test data
     Io(std::io::Error),
 }
 
-impl From<ParseTestStatusErr> for ParseTestDataErr
-{
-    fn from(parse_status_err: ParseTestStatusErr) -> Self
-    {
-        Self::InvalidStatus(parse_status_err)
-    }
-}
-
-impl From<std::num::ParseIntError> for ParseTestDataErr
-{
-    fn from(parse_num_err: std::num::ParseIntError) -> Self
-    {
-        Self::InvalidInteger(parse_num_err)
-    }
-}
-
-impl From<std::num::ParseFloatError> for ParseTestDataErr
-{
-    fn from(parse_num_err: std::num::ParseFloatError) -> Self
-    {
-        Self::InvalidDecimal(parse_num_err)
-    }
-}
-
-impl From<ParseTestTypeErr> for ParseTestDataErr
-{
-    fn from(parse_type_err: ParseTestTypeErr) -> Self
-    {
-        Self::InvalidTestType(parse_type_err)
-    }
-}
-
-impl From<std::string::FromUtf8Error> for ParseTestDataErr
-{
-    fn from(parse_utf8_err: std::string::FromUtf8Error) -> Self
-    {
-        Self::InvalidUtf8(parse_utf8_err)
-    }
-}
-
-impl From<std::io::Error> for ParseTestDataErr
-{
-    fn from(io_err: std::io::Error) -> Self
-    {
-        Self::Io(io_err)
-    }
-}
-
-impl fmt::Display for ParseTestDataErr
+impl fmt::Display for ParseError
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
     {
         match self {
-            Self::ResponseTooShort => write!(f, "Response too short. Not all expected data were contained"),
-            Self::InvalidTestType(test_type_err) => write!(f, "Invalid test type token. {}", test_type_err),
-            Self::UnexpectedStatus(status) => write!(f, "Unexpected status: {:?}. The test may be in progress", status),
-            Self::InvalidStatus(status_err) => write!(f, "{}", status_err),
-            Self::InvalidInteger(num_err) => write!(f, "Failed to parse memory location or ground bond result: {}", num_err),
-            Self::InvalidDecimal(num_err) => write!(f, "Failed to parse hipot leakage current: {}", num_err),
-            Self::InvalidUtf8(utf8_err) => write!(f, "The device replied with an unexpected character. Caused by {}", utf8_err),
-            Self::Io(io_err) => write!(f, "{}", io_err),
+            Self::InvalidFormat(fmt_err) => write!(f, "Unable to interpret data. {}", fmt_err),
+            Self::InvalidUtf8(decode_err) => write!(f, "Unable to decode data. {}", decode_err),
+            Self::Io(io_err) => write!(f, "Failed to query device. {}", io_err),
         }
     }
 }
 
-impl std::error::Error for ParseTestDataErr {}
+impl Error for ParseError {}
 
-
-
-pub(super) struct ArTestData
+impl From<std::io::Error> for ParseError
 {
-    data: TestData,
-}
-
-impl From<ArTestData> for TestData
-{
-    fn from(this: ArTestData) -> Self
+    fn from(this: std::io::Error) -> Self
     {
-        this.data
+        ParseError::Io(this)
     }
 }
 
-impl std::str::FromStr for ArTestData
+impl From<std::string::FromUtf8Error> for ParseError
 {
-    type Err = ParseTestDataErr;
-
-    fn from_str(data_str: &str) -> Result<Self, Self::Err>
+    fn from(this: std::string::FromUtf8Error) -> Self
     {
-        let (line1, line2) = if data_str.is_char_boundary(20) {
-            data_str.split_at(20)
-        }
-        else {
-            return Err(ParseTestDataErr::ResponseTooShort);
-        };
+        ParseError::InvalidUtf8(this)
+    }
+}
 
-        let (sequence_num, step_num) = {
-            // The format here is 'M #-#'
-            // I believe these have a memory location 50 which is why the space
-            if !(line2.is_char_boundary(1) && line2.is_char_boundary(5)) {
-                return Err(ParseTestDataErr::ResponseTooShort); // This is a unique failure mode
-            }
+impl From<FormatError> for ParseError
+{
+    fn from(this: FormatError) -> Self
+    {
+        ParseError::InvalidFormat(this)
+    }
+}
 
-            let mut nums_iter = (&line2[1..5]).split('-');
-            let seq = if let Some(num_str) = nums_iter.next() {
-                num_str.parse::<u32>()?
-            }
-            else {
-                // This should realistically be the only way we get this problem
-                return Err(ParseTestDataErr::ResponseTooShort);
-            };
-            let step = if let Some(num_str) = nums_iter.next() {
-                num_str.parse::<u32>()?
-            }
-            else {
-                // This should realistically be the only way we get this problem
-                return Err(ParseTestDataErr::ResponseTooShort);
-            };
-
-            (seq, step)
-        };
-
-        let test_type = if line1.is_char_boundary(3) {
-            (&line1[..3]).trim().parse::<SciTestType>()?
-        }
-        else {
-            return Err(ParseTestDataErr::InvalidTestType(ParseTestTypeErr{}));
-        };
-
-        // Insulation Resistance is not implemented yet but it has a different offset because it is only 2 characters long
-        let status_index = match test_type {
-            SciTestType::GndBond => 4,
-            SciTestType::AcHipot => 4,
-        };
-        let status_end = status_index + SciTestStatus::MAX_STR_LEN;
-
-        let test_status = if line1.is_char_boundary(status_index) && line1.is_char_boundary(status_end) {
-            (&line1[status_index..status_end]).trim().parse::<SciTestStatus>()?
-        }
-        else {
-            return Err(ParseTestDataErr::InvalidStatus(ParseTestStatusErr{}));
-        };
-
-        match test_type {
-            SciTestType::GndBond => {
-                let gnd_resistance = match test_status {
-                    SciTestStatus::HiLimit | SciTestStatus::LoLimit | SciTestStatus::Pass => {
-                        if line2.is_char_boundary(14) && line2.is_char_boundary(18) {
-                            let num_str = (&line2[14..18]).trim();
-                            
-                            if num_str.trim().starts_with('>') {
-                                None
-                            }
-                            else {
-                                Some(Ohm::from::<Milli>(num_str.parse::<u64>()?))
-                            }
-                        }
-                        else {
-                            // TODO better return type
-                            // this should be the only way this happens but not necessarily the only way
-                            return Err(ParseTestDataErr::ResponseTooShort);
-                        }
-                    },
-                    _ => {
-                        None
+macro_rules! parse_token
+{
+    ( $tok:expr, $tok_type:ty, $ln:expr, $idx:expr, $fail_mesg:expr, $raw_str:expr ) => {
+        if let Some(token) = $tok {
+            token.parse::<$tok_type>()
+                .map_err(|err| {
+                    FormatError {
+                        raw_data: String::from($raw_str),
+                        line: $ln,
+                        token: $idx,
+                        mesg: $fail_mesg,
+                        maybe_cause: Some(FormatErrorCause::from(err))
                     }
-                };
-                let gnd_bond_data = GndBondData {
-                    sequence_num: sequence_num,
-                    step_num: step_num,
-                    outcome: match test_status {
-                        SciTestStatus::Abort => GndBondOutcome::Aborted,
-                        SciTestStatus::HiLimit => {
-                            if let Some(ohms) = gnd_resistance {
-                                GndBondOutcome::ResistanceExcessive(ohms)
-                            }
-                            else {
-                                GndBondOutcome::ResistanceOverflow
-                            }
-                        },
-                        SciTestStatus::LoLimit => {
-                            if let Some(ohms) = gnd_resistance {
-                                GndBondOutcome::ResistanceSubnormal(ohms)
-                            }
-                            else {
-                                return Err(ParseTestDataErr::ResponseTooShort);
-                            }
-                        }
-                        SciTestStatus::Pass => {
-                            if let Some(ohms) = gnd_resistance {
-                                GndBondOutcome::ResistanceSubnormal(ohms)
-                            }
-                            else {
-                                return Err(ParseTestDataErr::ResponseTooShort);
-                            }
-                        },
-                        _ => return Err(ParseTestDataErr::UnexpectedStatus(test_status)),
-                        // SciTestStatus::Overflow => ,
-                        // SciTestStatus::Ramp,
-                        // SciTestStatus::Dwell,
-                        // SciTestStatus::ArcFail,
-                        // SciTestStatus::GndFault,
-                    }
-                };
-                Ok(Self {
-                    data: TestData::GndBond(gnd_bond_data)
                 })
-            },
-            SciTestType::AcHipot => {
-                let leak_current = match test_status {
-                    SciTestStatus::HiLimit | SciTestStatus::LoLimit | SciTestStatus::Pass => {
-                        if line2.is_char_boundary(14) && line2.is_char_boundary(18) {
-                            let num_str = (&line2[14..18]).trim();
-                            
-                            if num_str.trim().starts_with('>') {
-                                None
-                            }
-                            else {
-                                Some(Ampere::from_f64::<Milli>(num_str.parse::<f64>()?))
-                            }
-                        }
-                        else {
-                            // TODO better return type
-                            // this should be the only way this happens but not necessarily the only way
-                            return Err(ParseTestDataErr::ResponseTooShort);
-                        }
-                    },
-                    _ => {
-                        None
-                    }
-                };
-                let ac_hipot_data = AcHipotData {
-                    sequence_num: sequence_num,
-                    step_num: step_num,
-                    outcome: match test_status {
-                        SciTestStatus::Abort => AcHipotOutcome::Aborted,
-                        SciTestStatus::Overflow => AcHipotOutcome::LeakOverflow,
-                        SciTestStatus::HiLimit => {
-                            if let Some(amps) = leak_current {
-                                AcHipotOutcome::LeakExcessive(amps)
-                            }
-                            else {
-                                AcHipotOutcome::LeakOverflow
-                            }
-                        },
-                        SciTestStatus::LoLimit => {
-                            if let Some(amps) = leak_current {
-                                AcHipotOutcome::LeakSubnormal(amps)
-                            }
-                            else {
-                                return Err(ParseTestDataErr::ResponseTooShort);
-                            }
-                        },
-                        SciTestStatus::GndFault => AcHipotOutcome::GndFault,
-                        SciTestStatus::ArcFail => AcHipotOutcome::ArcFault,
-                        SciTestStatus::Pass => {
-                            if let Some(amps) = leak_current {
-                                AcHipotOutcome::LeakSubnormal(amps)
-                            }
-                            else {
-                                return Err(ParseTestDataErr::ResponseTooShort);
-                            }
-                        },
-                        _ => return Err(ParseTestDataErr::UnexpectedStatus(test_status)),
-                        // SciTestStatus::Overflow => ,
-                        // SciTestStatus::Ramp,
-                        // SciTestStatus::Dwell,
-                        // SciTestStatus::ArcFail,
-                        // SciTestStatus::GndFault,
-                    }
-                };
-                Ok(Self {
-                    data: TestData::AcHipot(ac_hipot_data)
-                })
+        }
+        else {
+            Err(FormatError {
+                raw_data: String::from($raw_str),
+                line: $ln,
+                token: $idx,
+                mesg: $fail_mesg,
+                maybe_cause: Some(FormatErrorCause::Truncated),
+            })
+        }
+    }
+}
+
+macro_rules! impl_parse_enum_err
+{
+    { $name:ty, $err_str:literal } => {
+        impl $name
+        {
+            fn valid_str_variants() -> &'static str
+            {
+                $err_str
+            }
+        }
+
+        impl fmt::Display for $name
+        {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+            {
+                f.write_str(Self::valid_str_variants())
+            }
+        }
+
+        impl std::error::Error for $name {}
+
+        impl From<$name> for super::FormatErrorCause
+        {
+            fn from(_this: $name) -> FormatErrorCause
+            {
+                FormatErrorCause::InvalidEnum($name::valid_str_variants())
             }
         }
     }
