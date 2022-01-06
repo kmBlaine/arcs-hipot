@@ -9,24 +9,31 @@ use std::{
 pub(crate) mod sci;
 pub(crate) mod ar;
 
+/// The final result of an AC hipot test
+///
+/// This enum is intended to encompass a basic, device-agnostic representation of outcomes. Therefore
+/// by design, it does NOT have a 1:1 correspondence with the data returned by the device.
 #[derive(Debug, Clone)]
 pub enum AcHipotOutcome
 {
-    /// The leakage current exceeded the instrumet's metering range
+    /// The leakage current exceeded the metering range of the instrument
     LeakOverflow,
     /// The leakage current exceeded the maximum acceptable limit
     ///
-    /// This implies that the current fell within metering range
+    /// This implies that the current fell within metering range. The measured leakage current is
+    /// contained
     LeakExcessive(Ampere),
-    /// The leakage current fell below the minimum acceptable limit
+    /// The leakage current fell below the minimum acceptable limit. The measuered leakage current is
+    /// contained
     LeakSubnormal(Ampere),
     /// An arcing condition was detected
     ArcFault,
-    /// The high voltage lead has connected directly to earth, skipping the ground return lead
+    /// The instrument detected that the high voltage lead has connected directly to earth, skipping
+    /// the ground return lead
     GndFault,
-    /// Operator aborted the test on the instrument UI
+    /// The test was stopped before it could be completed
     Aborted,
-    /// The leakage current was within acceptable limits
+    /// The test passed. The measured leakage current is given
     Passed(Ampere),
 }
 
@@ -41,21 +48,36 @@ impl AcHipotOutcome
     }
 }
 
+/// Result of the AC hipot test run at a given sequence and step number
 #[derive(Debug, Clone)]
 pub struct AcHipotData
 {
+    /// Sequence number
     pub sequence_num: u32,
+    /// Step number in the given sequence
     pub step_num: u32,
+    /// Result of the test
     pub outcome: AcHipotOutcome,
 }
 
+/// The final result of a ground bond test
+///
+/// This enum is intended to encompass a basic, device-agnostic representation of outcomes. Therefore
+/// by design, it does NOT have a 1:1 correspondence with the data returned by the device.
 #[derive(Debug, Clone)]
 pub enum GndBondOutcome
 {
+    /// The ground resistance exceeded the metering range of the instrument
     ResistanceOverflow,
+    /// The ground resistance is beyond the maximum resistance allowed. The measured resistance is
+    /// contained
     ResistanceExcessive(Ohm),
+    /// The ground resistance is below the minimum resistance allowed. The measured resistance is
+    /// contained
     ResistanceSubnormal(Ohm),
+    /// The test was stopped before it could be finished
     Aborted,
+    /// The test passed. The measured ground resistance is given
     Passed(Ohm),
 }
 
@@ -70,14 +92,26 @@ impl GndBondOutcome
     }
 }
 
+/// Result of the ground bond test at the given sequence and step number
 #[derive(Debug, Clone)]
 pub struct GndBondData
 {
+    /// Sequence number of this test
     pub sequence_num: u32,
+    /// Step number of this test
     pub step_num: u32,
+    /// Result of the test
     pub outcome: GndBondOutcome
 }
 
+/// Unified type for reporting test results
+///
+/// The test results as stored by the device are not strongly but rather _stringly_ typed where the
+/// type of data being retrieved is not apparent until it has been parsed at least partway. This is
+/// because the same command retrieves all of them and the buffers are not unique to each type.
+/// Consequently, the parsing routines -- in order to reduce boilerplate and more complicated error
+/// return types -- parse to a unified type which can then be interpreted by the user as matching
+/// what they expected or not.
 #[derive(Debug, Clone)]
 pub enum TestData
 {
@@ -142,14 +176,21 @@ impl From<std::num::ParseFloatError> for FormatErrorCause
 }
 
 /// A parsing error caused by a test result string of unexpected or invalid format
+///
+/// This error type is mostly opaque so that the low level parsing mechanics are not exposed to the
+/// the user and because the most likely cause of format errors is bugs in the parsing code itself.
+/// If a format error is triggered when attempting to retrieve test results, there's probably nothing
+/// that can be done.
+///
+/// For easing of identification of bugs, a copy of the string causing the problem is publicly visible.
 #[derive(Debug)]
 pub struct FormatError
 {
     /// The string returned by the device
     ///
-    /// Note that for Associated Research devices, it does not include a line break between the two
-    /// lines of display text that it returns. The parser will insert one for easier debugging by a
-    /// human.
+    /// Note that the response from Associated Research devices does not include a line break between
+    /// the two lines of display text. If the line is longer than the line length of 20 characters,
+    /// one will be inserted automatically.
     pub raw_data: String,
     /// The line number of the error
     line: usize,
@@ -181,6 +222,10 @@ impl fmt::Display for FormatError
 impl Error for FormatError {}
 
 /// An error describing a failure to parse test data
+///
+/// In order for test results to be parsed successfully, the test must be complete. For example, if
+/// the test status of an AC hipot or ground bond test is in the "Ramp" or "Dwell" phases, an invalid
+/// format error will be triggered.
 #[derive(Debug)]
 pub enum ParseError
 {
