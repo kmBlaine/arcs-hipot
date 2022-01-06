@@ -189,6 +189,19 @@ impl ArTestData
         // This is just a progress value. Not relevant to final output
         tokens2.next();
 
+        let leakage = if let Some(token) = tokens2.next() {
+            token
+        }
+        else {
+            return Err(FormatError {
+                raw_data: String::from(data_str),
+                line: 2,
+                token: 3,
+                mesg: "failed to parse leakage current",
+                maybe_cause: Some(FormatErrorCause::Truncated),
+            });
+        };
+
         let data = TestData::AcHipot(AcHipotData {
             sequence_num: sequence_num,
             step_num: step_num,
@@ -197,32 +210,21 @@ impl ArTestData
                 AcHipotStatus::ArcFail => AcHipotOutcome::ArcFault,
                 AcHipotStatus::GndFault => AcHipotOutcome::GndFault,
                 AcHipotStatus::HiLimit => {
-                    if let Some(token) = tokens2.next() {
-                        if token.starts_with('>') {
-                            AcHipotOutcome::LeakOverflow
-                        }
-                        else {
-                            let leak_current = parse_token!(token.split('m').next(), f64, 2, 3, "failed to parse hipot leak current", data_str)?;
-                            AcHipotOutcome::LeakExcessive(Ampere::from_f64::<Milli>(leak_current))
-                        }
+                    if leakage.starts_with('>') {
+                        AcHipotOutcome::LeakOverflow
                     }
                     else {
-                        return Err(FormatError {
-                            raw_data: String::from(data_str),
-                            line: 2,
-                            token: 3,
-                            mesg: "failed to parse leakage current",
-                            maybe_cause: Some(FormatErrorCause::Truncated),
-                        });
+                        let leak_current = parse_token!(leakage.split('m').next(), f64, 2, 3, "failed to parse hipot leak current", data_str)?;
+                        AcHipotOutcome::LeakExcessive(Ampere::from_f64::<Milli>(leak_current))
                     }
                 },
                 AcHipotStatus::LoLimit => {
-                    let gnd_resistance = parse_token!(tokens2.next(), f64, 2, 3, "failed to parse hipot leak current", data_str)?;
+                    let gnd_resistance = parse_token!(leakage.split('m').next(), f64, 2, 3, "failed to parse hipot leak current", data_str)?;
                     AcHipotOutcome::LeakSubnormal(Ampere::from_f64::<Milli>(gnd_resistance))
                 },
                 AcHipotStatus::Abort => AcHipotOutcome::Aborted,
                 AcHipotStatus::Pass => {
-                    let gnd_resistance = parse_token!(tokens2.next(), f64, 2, 3, "failed to parse hipot leak current", data_str)?;
+                    let gnd_resistance = parse_token!(leakage.split('m').next(), f64, 2, 3, "failed to parse hipot leak current", data_str)?;
                     AcHipotOutcome::Passed(Ampere::from_f64::<Milli>(gnd_resistance))
                 },
             }
@@ -267,8 +269,13 @@ impl ArTestData
             step_num: step_num,
             outcome: match status {
                 GndBondStatus::HiLimit => {
-                    let gnd_resistance = parse_token!(resistance.split('m').next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
-                    GndBondOutcome::ResistanceExcessive(Ohm::from::<Milli>(gnd_resistance))
+                    if resistance.starts_with('>') {
+                        GndBondOutcome::ResistanceOverflow
+                    }
+                    else {
+                        let gnd_resistance = parse_token!(resistance.split('m').next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
+                        GndBondOutcome::ResistanceExcessive(Ohm::from::<Milli>(gnd_resistance))
+                    }
                 },
                 GndBondStatus::LoLimit => {
                     let gnd_resistance = parse_token!(resistance.split('m').next(), u64, 2, 3, "failed to parse ground resistance", data_str)?;
@@ -370,13 +377,30 @@ mod tests
     use super::ArTestData;
 
     #[test]
+    fn parse_gnd_bond_dwell_fails()
+    {
+        let gnd_str = "GND Dwell       0.5sM 1-1 24.82A    21mΩ";
+        let res = gnd_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_err());
+    }
+
+    #[test]
     fn parse_gnd_bond_pass()
     {
         let gnd_pass_str = "GND Pass        1.0sM 1-1 25.00A    14mΩ";
         let res = gnd_pass_str.parse::<ArTestData>();
 
         match res {
-            Ok(ref _test_data) => (),
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
             Err(ref err) => {
                 println!("{}", err);
                 println!("{}", err.raw_data);
@@ -384,5 +408,107 @@ mod tests
         }
 
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn parse_gnd_bond_overflow()
+    {
+        let gnd_overflow_str = "GND HI-Limit    0.4sM 1-1  0.00A  >600mΩ";
+        let res = gnd_overflow_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn parse_ac_hipot_short()
+    {
+        let acw_str = "ACW Short       0.0sM 2-1 -.--KV  >100mA";
+        let res = acw_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn parse_ac_hipot_breakdown()
+    {
+        let acw_str = "ACW Breakdown   0.0sM 2-1 -.--KV  >100mA";
+        let res = acw_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn parse_ac_hipot_subnormal()
+    {
+        let acw_str = "ACW LO-Limit    0.2sM 2-1 1.25KV 0.055mA";
+        let res = acw_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn parse_ac_hipot_pass()
+    {
+        let acw_str = "ACW Pass        1.0sM 2-1 1.25KV  6.30mA";
+        let res = acw_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn parse_ac_hipot_dwell_fails()
+    {
+        let acw_str = "ACW Dwell       0.5sM 2-1 1.25KV 2.151mA";
+        let res = acw_str.parse::<ArTestData>();
+
+        match res {
+            Ok(ref test_data) => println!("{:#?}", test_data.data),
+            Err(ref err) => {
+                println!("{}", err);
+                println!("{}", err.raw_data);
+            },
+        }
+
+        assert!(res.is_err());
     }
 }
