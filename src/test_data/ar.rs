@@ -2,7 +2,6 @@
 
 use std::{
     fmt,
-    error::Error,
     convert::From
 };
 

@@ -2,12 +2,11 @@
 
 use std::{
     fmt,
-    error::Error,
     convert::From,
 };
 
 use crate::{
-    units::{ Ampere, Volt, Ohm, scalar::Milli },
+    units::{ Ampere, Ohm, scalar::Milli },
     test_data::{ AcHipotOutcome, GndBondOutcome, FormatError, FormatErrorCause, TestData, GndBondData, AcHipotData },
 };
 

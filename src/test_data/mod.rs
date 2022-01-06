@@ -1,6 +1,6 @@
 //! Test results and data parsing
 
-use crate::units::{ Ampere, Volt, Ohm, scalar::Milli };
+use crate::units::{ Ampere, Ohm, };
 use std::{
     fmt,
     error::Error,

@@ -179,7 +179,7 @@ macro_rules! define_device
                 TestParams, AcHipotTestSpec, GndBondTestSpec
             },
             test_data::{ TestData, ParseError },
-            units::{ Ampere, Volt, Ohm, Second, scalar::{ Milli, Kilo, Micro }}
+            units::{ Ampere, Volt, Ohm, Second, }
         };
         use tokio::io::{ AsyncWriteExt, AsyncReadExt };
 
@@ -212,12 +212,16 @@ macro_rules! define_device
 
             impl_device!{load_sequence $qualifier}
 
+            /// Run a test starting at the currently selected step
             pub async fn start_test(&mut self) -> Result<(), std::io::Error>
             {
                 self.io_handle.exec_cmd(CmdSet::RunTest).await?;
                 Ok(())
             }
         
+            /// Return the device to a ready-to-run state
+            ///
+            /// This will cancel any running tests but will leave test data and memory intact.
             pub async fn soft_reset(&mut self) -> Result<(), std::io::Error>
             {
                 self.io_handle.exec_cmd(CmdSet::SoftReset).await?;
@@ -281,6 +285,10 @@ macro_rules! define_device
                 self
             }
 
+            /// Set the continuation flag
+            ///
+            /// When set, the instrument will automtically begin executing the next step in the sequence when this one
+            /// completes.
             pub fn continue_to_next(mut self, cont: bool) -> Self
             {
                 self.editor.continue_to_next(&mut self.steps, cont);
